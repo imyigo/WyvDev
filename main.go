@@ -279,20 +279,22 @@ func detectIdes() []DetectedIde {
 // ---------- MCP config sync (used by both --once CLI and the live server) ----------
 
 func loadCoreTemplate() (*McpConfigFile, error) {
+	s, err := loadState()
+	if err == nil && len(s.McpServers) > 0 {
+		return buildMcpConfigFile(s.McpServers), nil
+	}
+
 	baseDir := getBaseDir()
 	templatePath := filepath.Join(baseDir, "core", "mcp-config.json")
-
 	data, err := os.ReadFile(templatePath)
-	if err != nil {
-		return nil, fmt.Errorf("core/mcp-config.json bulunamadi: %v", err)
+	if err == nil {
+		var config McpConfigFile
+		if err := json.Unmarshal(data, &config); err == nil {
+			return &config, nil
+		}
 	}
 
-	var config McpConfigFile
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("JSON parse hatasi: %v", err)
-	}
-
-	return &config, nil
+	return &McpConfigFile{McpServers: make(map[string]McpServerConfig)}, nil
 }
 
 func buildMcpConfigFile(entries []MCPEntry) *McpConfigFile {
@@ -2445,28 +2447,22 @@ func runServer() {
 
 func runSkillsScript() {
 	fmt.Println("\n================================================================")
-	fmt.Println(" [Skills] Global Skill Kurulum Scripti Tetikleniyor...")
+	fmt.Println(" [Skills] Global Skill Kurulumu Senkronize Ediliyor...")
 	fmt.Println("================================================================")
 
-	baseDir := getBaseDir()
-	batPath := filepath.Join(baseDir, "core", "install-skills.bat")
-
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.Command("cmd.exe", "/c", batPath)
-	} else {
-		psPath := filepath.Join(baseDir, "core", "install-skills.ps1")
-		cmd = exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-File", psPath)
+	s, err := loadState()
+	if err != nil || len(s.RecommendedRepos) == 0 {
+		fmt.Println("✅ Saklı skill bulunamadı, tamamlandı.")
+		return
 	}
 
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("⚠️ Skills script uyarisi: %v\n", err)
-	} else {
-		fmt.Println("✅ Global Skiller basariyla senkronize edildi.")
+	for _, skill := range s.RecommendedRepos {
+		if skill.Repo != "" {
+			fmt.Printf("  - Skill kuruluyor: %s (%s)...\n", skill.Name, skill.Repo)
+			_ = exec.Command("npx", "-y", "skills", "add", skill.Repo, "--all").Run()
+		}
 	}
+	fmt.Println("✅ Global Skiller başarıyla senkronize edildi.")
 }
 
 func runOnceCli() {
