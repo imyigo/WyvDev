@@ -10,6 +10,7 @@
   <p>
     <a href="https://github.com/imyigo/WyvDev/stargazers"><img src="https://img.shields.io/github/stars/imyigo/WyvDev?style=for-the-badge&logo=github&color=gold" alt="GitHub Stars"></a>
     <a href="https://github.com/imyigo/WyvDev/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.style=for-the-badge" alt="License"></a>
+    <a href="https://github.com/imyigo/WyvDev"><img src="https://img.shields.io/badge/Status-Public%20Beta%20v0.9-orange?style=for-the-badge&logo=rocket" alt="Public Beta"></a>
     <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version"></a>
     <a href="#"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue?style=for-the-badge" alt="Platform"></a>
     <a href="#"><img src="https://img.shields.io/badge/i18n-English%20%7C%20Türkçe-purple?style=for-the-badge" alt="i18n"></a>
@@ -17,6 +18,9 @@
 
   <br />
 </div>
+
+> [!IMPORTANT]
+> ⚠️ **WyvDev is currently in Public Beta (v0.9).** Active development is underway. Your feedback, bug reports, and pull requests are highly appreciated!
 
 ---
 
