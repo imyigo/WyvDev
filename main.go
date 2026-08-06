@@ -2098,6 +2098,143 @@ func handleIdeBackup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---------- WyvDev Agentic Loop Engine (Autonomous AI Agent Infrastructure) ----------
+
+func handleLoopHeartbeat(w http.ResponseWriter, r *http.Request) {
+	runningAppsMux.Lock()
+	apps := []*RunningApp{}
+	for _, app := range runningAppsMap {
+		if app.PID > 0 && app.Port == "" {
+			app.Port = detectPortByPID(app.PID)
+		}
+		apps = append(apps, app)
+	}
+	runningAppsMux.Unlock()
+
+	s, err := loadState()
+	if err != nil {
+		s = &StateBundle{}
+	}
+
+	writeJSON(w, 200, map[string]interface{}{
+		"agenticLoopEngine": "active",
+		"version":           "v0.9.0-beta",
+		"timestamp":         time.Now().Format(time.RFC3339),
+		"activeAppsCount":   len(apps),
+		"runningApps":       apps,
+		"idePathsCount":     len(s.IdePaths),
+		"mcpServersCount":   len(s.McpServers),
+		"trackedReposCount": len(s.TrackedRepos),
+	})
+}
+
+func handleLoopAutoHeal(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+		writeErr(w, 400, "geçersiz repo adı")
+		return
+	}
+
+	name := body.Name
+	dir := repoDir(name)
+	if _, err := os.Stat(dir); err != nil {
+		writeErr(w, 404, "repo klasörü bulunamadı: "+dir)
+		return
+	}
+
+	runningAppsMux.Lock()
+	if app, ok := runningAppsMap[name]; ok && app.PID > 0 {
+		if runtime.GOOS == "windows" {
+			_ = exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(app.PID)).Run()
+		} else {
+			if proc, err := os.FindProcess(app.PID); err == nil {
+				_ = proc.Kill()
+			}
+		}
+		delete(runningAppsMap, name)
+	}
+	runningAppsMux.Unlock()
+
+	repoStartErrorsMux.Lock()
+	delete(repoStartErrors, name)
+	repoStartErrorsMux.Unlock()
+
+	entry := scanRepoFolder(name)
+	var healCmd *exec.Cmd
+	healActionStr := "npm install --force"
+
+	if containsRuntime(entry.Runtimes, "python") {
+		healActionStr = "python -m pip install --upgrade --force-reinstall -r requirements.txt"
+		healCmd = exec.Command("python", "-m", "pip", "install", "--upgrade", "--force-reinstall", "-r", "requirements.txt")
+	} else if containsRuntime(entry.Runtimes, "rust") {
+		healActionStr = "cargo clean"
+		healCmd = exec.Command("cargo", "clean")
+	} else {
+		healCmd = exec.Command("npm", "install", "--force")
+	}
+
+	healCmd.Dir = dir
+	healCmd.Env = getEnhancedEnv()
+	out, healErr := healCmd.CombinedOutput()
+	outStr := strings.TrimSpace(string(out))
+
+	logActivity("loop-auto-heal", fmt.Sprintf("%s (%s - %v)", name, healActionStr, healErr == nil))
+
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":         healErr == nil,
+		"name":       name,
+		"healAction": healActionStr,
+		"output":     outStr,
+		"message":    fmt.Sprintf("🌀 WyvDev Agentic Loop Engine '%s' projesini başarıyla iyileştirdi (%s).", name, healActionStr),
+	})
+}
+
+func handleLoopVerify(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name    string `json:"name"`
+		Command string `json:"command"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Command == "" {
+		writeErr(w, 400, "geçersiz doğrulama komutu")
+		return
+	}
+
+	dir := getBaseDir()
+	if body.Name != "" {
+		targetDir := repoDir(body.Name)
+		if _, err := os.Stat(targetDir); err == nil {
+			dir = targetDir
+		}
+	}
+
+	parts := strings.Fields(body.Command)
+	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd.Dir = dir
+	cmd.Env = getEnhancedEnv()
+
+	out, err := cmd.CombinedOutput()
+	outStr := strings.TrimSpace(string(out))
+	exitCode := 0
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			exitCode = exitError.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+
+	writeJSON(w, 200, map[string]interface{}{
+		"passed":   err == nil,
+		"exitCode": exitCode,
+		"command":  body.Command,
+		"dir":      dir,
+		"output":   outStr,
+	})
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -2151,6 +2288,9 @@ func runServer() {
 	mux.HandleFunc("POST /api/apps/{name}/kill", handleAppKill)
 	mux.HandleFunc("GET /api/system/health", handleSystemHealth)
 	mux.HandleFunc("POST /api/system/install", handleSystemInstall)
+	mux.HandleFunc("GET /api/loop/heartbeat", handleLoopHeartbeat)
+	mux.HandleFunc("POST /api/loop/auto-heal", handleLoopAutoHeal)
+	mux.HandleFunc("POST /api/loop/verify", handleLoopVerify)
 	mux.HandleFunc("GET /api/github/search", handleGithubSearch)
 	mux.HandleFunc("POST /api/skills/install", handleSkillInstall)
 	mux.Handle("/", http.FileServer(http.Dir(baseDir)))
