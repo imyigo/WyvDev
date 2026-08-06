@@ -1940,9 +1940,13 @@ async function initLoopEnginePage() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  renderMcps();
-  renderSkills();
-  renderIdePaths();
+  // i18n — dil tercihini uygula
+  updateLanguageUI();
+
+  // Safe render calls — index.html'e özgü fonksiyonlar diğer sayfalarda yoktur
+  try { if (typeof renderMcps === 'function') renderMcps(); } catch (e) {}
+  try { if (typeof renderSkills === 'function') renderSkills(); } catch (e) {}
+  try { if (typeof renderIdePaths === 'function') renderIdePaths(); } catch (e) {}
 
   // Restore Yerel Kütüphane filter & sort session state
   const typeFilterEl = document.getElementById('repo-type-filter');
@@ -1950,23 +1954,23 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeFilterEl) typeFilterEl.value = SessionStore.get('repo_type_filter', 'all');
   if (sortByEl) sortByEl.value = SessionStore.get('repo_sort_by', 'name');
 
-  const modeBtn = libraryViewMode === 'grid' ? 'grid' : 'table';
-  setLibraryViewMode(modeBtn);
+  try { setLibraryViewMode(libraryViewMode === 'grid' ? 'grid' : 'table'); } catch (e) {}
 
   if (document.getElementById('gh-search-results')) {
     const cachedQuery = SessionStore.get('gh_query', '');
     const ghInput = document.getElementById('gh-search-input');
     if (ghInput && cachedQuery) ghInput.value = cachedQuery;
-    performGithubSearch(cachedQuery);
+    try { performGithubSearch(cachedQuery); } catch (e) {}
   }
 
-  if (document.getElementById('library-scan-body')) loadLibraryScan();
-  if (document.getElementById('loop-status-val')) initLoopEnginePage();
+  try { if (document.getElementById('library-scan-body')) loadLibraryScan(); } catch (e) {}
+  try { if (document.getElementById('loop-status-val')) initLoopEnginePage(); } catch (e) {}
   if (document.getElementById('activity-log-output')) {
-    loadActivityLog();
-    setInterval(loadActivityLog, 30000);
+    try { loadActivityLog(); } catch (e) {}
+    setInterval(() => { try { loadActivityLog(); } catch (e) {} }, 30000);
   }
-  if (document.getElementById('tracked-repos-body')) initSettingsPage();
+  try { if (document.getElementById('tracked-repos-body')) initSettingsPage(); } catch (e) {}
+
   if (window.lucide) lucide.createIcons();
 
   // Restore scroll position
@@ -1977,12 +1981,12 @@ document.addEventListener('DOMContentLoaded', () => {
     SessionStore.set('scroll_y', window.scrollY);
   });
 
+  // Backend bağlantısı — HER sayfada çalışır
   hydrateFromBackend();
-  pollLiveTasks();
+  try { pollLiveTasks(); } catch (e) {}
 
-  // Canlı takip ve otomatik senkronizasyon
   setInterval(hydrateFromBackend, 30000);
-  setInterval(pollLiveTasks, 2000);
+  try { setInterval(pollLiveTasks, 2000); } catch (e) {}
   window.addEventListener('focus', hydrateFromBackend);
-  window.addEventListener('focus', pollLiveTasks);
+  try { window.addEventListener('focus', pollLiveTasks); } catch (e) {}
 });
