@@ -2723,5 +2723,20 @@ func main() {
 		runOnceCli()
 		return
 	}
+
+	// Singleton guard — eğer zaten çalışan bir instance varsa sadece tarayıcı aç ve çık
+	addr := fmt.Sprintf("127.0.0.1:%d", defaultPort)
+	url := fmt.Sprintf("http://%s/index.html", addr)
+	conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		fmt.Println("================================================================")
+		fmt.Println(" WyvDev Hub — Zaten çalışıyor!")
+		fmt.Printf(" Mevcut sunucuya bağlanılıyor: %s\n", url)
+		fmt.Println("================================================================")
+		openBrowser(url, addr)
+		return
+	}
+
 	runServer()
 }
