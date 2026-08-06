@@ -855,19 +855,38 @@ function resetToDefaultMcps() {
 async function exportState() {
   try {
     const res = await fetch(`${API_BASE}/api/state`);
-    const data = res.ok ? await res.json() : {
+    const stateData = res.ok ? await res.json() : {};
+
+    let loopConfig = {};
+    try {
+      const loopRes = await fetch(`${API_BASE}/api/loop/config`);
+      if (loopRes.ok) loopConfig = await loopRes.json();
+    } catch (e) {}
+
+    const backupPackage = {
+      version: 'wyvdev-full-backup-v1',
+      exportedAt: new Date().toISOString(),
       mcpServers: activeMcpServers,
       recommendedRepos: activeRecommendedRepos,
       idePaths: activeIdePaths,
-      trackedRepos: []
+      trackedRepos: stateData.trackedRepos || [],
+      deletedIdeIds: stateData.deletedIdeIds || [],
+      loopConfig: loopConfig,
+      uiPreferences: {
+        repo_type_filter: SessionStore.get('repo_type_filter', 'all'),
+        repo_sort_by: SessionStore.get('repo_sort_by', 'name'),
+        library_view: localStorage.getItem('aitoolkit_library_view') || 'table',
+        wyvdev_lang: localStorage.getItem('wyvdev_lang') || 'tr'
+      }
     };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+
+    const blob = new Blob([JSON.stringify(backupPackage, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `ai-toolkit-export-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `wyvdev-full-backup-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
-    showToast('📦 Ayarlar JSON olarak indirildi.');
+    showToast('📦 WyvDev tam yedek ve göç paketi (Full Backup) indirildi.');
   } catch (e) {
     showToast('⚠️ Dışa aktarma hatası: ' + e.message);
   }
@@ -879,7 +898,7 @@ function importState(file) {
   reader.onload = async () => {
     try {
       const data = JSON.parse(reader.result);
-      if (!confirm('İçe aktarılan JSON; mevcut tüm MCP, Skills ve IDE yolu verilerinin üzerine yazacak. Devam edilsin mi?')) return;
+      if (!confirm('İçe aktarılan WyvDev yedek paketi; mevcut tüm MCP, Skills, IDE yolları ve proje ayarlarının üzerine yazılacak. Eksik olan repolar otomatik klonlanacaktır.\n\nDevam edilsin mi?')) return;
 
       if (Array.isArray(data.mcpServers)) {
         activeMcpServers = data.mcpServers;
@@ -894,11 +913,34 @@ function importState(file) {
         localStorage.setItem('aitoolkit_ide_paths', JSON.stringify(activeIdePaths));
       }
 
-      const res = await fetch(`${API_BASE}/api/state`, {
+      if (data.uiPreferences) {
+        if (data.uiPreferences.repo_type_filter) SessionStore.set('repo_type_filter', data.uiPreferences.repo_type_filter);
+        if (data.uiPreferences.repo_sort_by) SessionStore.set('repo_sort_by', data.uiPreferences.repo_sort_by);
+        if (data.uiPreferences.library_view) localStorage.setItem('aitoolkit_library_view', data.uiPreferences.library_view);
+        if (data.uiPreferences.wyvdev_lang) localStorage.setItem('wyvdev_lang', data.uiPreferences.wyvdev_lang);
+      }
+
+      const res = await fetch(`${API_BASE}/api/state/migrate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
       });
+      const result = await res.ok ? await res.json() : {};
+
+      renderMcps();
+      renderSkills();
+      renderIdePaths();
+      if (document.getElementById('library-scan-body')) loadLibraryScan();
+      if (document.getElementById('tracked-repos-body')) renderTrackedRepos();
+
+      const clonedCount = (result.clonedRepos || []).length;
+      showToast(result.message || `🎉 WyvDev yedek paketi başarıyla yüklendi (${clonedCount} repo klonlanıyor).`);
+    } catch (err) {
+      showToast('⚠️ Geçersiz yedek JSON dosyası: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
       if (!res.ok) throw new Error('backend reddetti');
       setBackendStatus(true);
       showToast('✅ İçe aktarma tamamlandı — git yolu içeren skiller yerelde yoksa otomatik klonlanacak.');

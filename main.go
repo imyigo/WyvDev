@@ -755,6 +755,85 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleStateMigrate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+
+	var incoming struct {
+		McpServers       []MCPEntry             `json:"mcpServers"`
+		RecommendedRepos []SkillEntry           `json:"recommendedRepos"`
+		IdePaths         []IdePathEntry         `json:"idePaths"`
+		TrackedRepos     []TrackedRepo          `json:"trackedRepos"`
+		DeletedIdeIDs    []string               `json:"deletedIdeIds,omitempty"`
+		LoopConfig       LoopEngineConfig       `json:"loopConfig,omitempty"`
+		UIPreferences    map[string]interface{} `json:"uiPreferences,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+		writeErr(w, 400, "geçersiz yedek JSON dosyası: "+err.Error())
+		return
+	}
+
+	s, err := loadState()
+	if err != nil {
+		s = &StateBundle{}
+	}
+
+	if len(incoming.McpServers) > 0 {
+		s.McpServers = incoming.McpServers
+	}
+	if len(incoming.RecommendedRepos) > 0 {
+		s.RecommendedRepos = incoming.RecommendedRepos
+	}
+	if len(incoming.TrackedRepos) > 0 {
+		s.TrackedRepos = incoming.TrackedRepos
+	}
+	if len(incoming.DeletedIdeIDs) > 0 {
+		s.DeletedIdeIDs = incoming.DeletedIdeIDs
+	}
+	if incoming.LoopConfig.MaxRetries > 0 {
+		s.LoopConfig = incoming.LoopConfig
+	}
+
+	if err := saveState(s); err != nil {
+		writeErr(w, 500, "durum kaydedilemedi: "+err.Error())
+		return
+	}
+
+	newIdes := detectIdes()
+	s.IdePaths = make([]IdePathEntry, 0, len(newIdes))
+	for _, ide := range newIdes {
+		if ide.Detected {
+			s.IdePaths = append(s.IdePaths, IdePathEntry{
+				ID:     ide.ID,
+				Name:   ide.Name,
+				Path:   ide.Path,
+				Status: "✓ Algılandı",
+			})
+		}
+	}
+	_ = saveState(s)
+
+	syncResults := []map[string]interface{}{}
+	if len(s.McpServers) > 0 {
+		syncResults = syncAllIdes(s.McpServers)
+	}
+
+	cloneResults := autoCloneMissingRepos(s)
+
+	logActivity("state-migrate", fmt.Sprintf("Yedek paketi yüklendi: %d MCP, %d Repo klonlandı", len(s.McpServers), len(cloneResults)))
+
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":            true,
+		"syncedIdes":    syncResults,
+		"clonedRepos":   cloneResults,
+		"uiPreferences": incoming.UIPreferences,
+		"message":       fmt.Sprintf("🎉 WyvDev yedek paketi yüklendi! %d MCP sunucusu yerel IDE'lere işlendi, %d repo otomatik klonlanıyor.", len(s.McpServers), len(cloneResults)),
+	})
+}
+
 func handleIdesDetect(w http.ResponseWriter, r *http.Request) {
 	resetAll := r.URL.Query().Get("reset") == "true"
 
@@ -2318,6 +2397,7 @@ func runServer() {
 
 	mux.HandleFunc("GET /api/state", handleState)
 	mux.HandleFunc("POST /api/state", handleState)
+	mux.HandleFunc("POST /api/state/migrate", handleStateMigrate)
 	mux.HandleFunc("GET /api/ides/detect", handleIdesDetect)
 	mux.HandleFunc("POST /api/ides/backup", handleIdeBackup)
 	mux.HandleFunc("POST /api/ides/{id}/danger-delete", handleDangerDelete)
