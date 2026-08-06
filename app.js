@@ -1578,6 +1578,213 @@ function initSettingsPage() {
   trackedReposPollTimer = setInterval(renderTrackedRepos, 5 * 60 * 1000);
 }
 
+// ---------- WyvDev Agentic Loop Engine UI Handlers ----------
+
+async function refreshLoopHeartbeat(btnEl) {
+  const startTime = Date.now();
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Sorgulanıyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/loop/heartbeat`);
+    const latency = Date.now() - startTime;
+    if (!res.ok) throw new Error('Heartbeat alınamadı');
+    const data = await res.json();
+
+    const statusVal = document.getElementById('loop-status-val');
+    const appsVal = document.getElementById('loop-active-apps-val');
+    const idesVal = document.getElementById('loop-ides-val');
+    const latencyVal = document.getElementById('loop-latency-val');
+
+    if (statusVal) statusVal.innerText = '🟢 Aktif';
+    if (appsVal) appsVal.innerText = `${data.activeAppsCount || 0} Uygulama`;
+    if (idesVal) idesVal.innerText = `${data.idePathsCount || 0} Konfigürasyon`;
+    if (latencyVal) latencyVal.innerText = `${latency} ms`;
+
+    showToast('🌀 WyvDev Agentic Loop Engine Heartbeat güncellendi.');
+  } catch (e) {
+    showToast('⚠️ Loop Heartbeat hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+async function loadLoopEngineConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/loop/config`);
+    if (!res.ok) return;
+    const cfg = await res.json();
+
+    const healEl = document.getElementById('cfg-auto-heal-enabled');
+    const killEl = document.getElementById('cfg-auto-kill-port');
+    const retriesEl = document.getElementById('cfg-max-retries');
+    const strategyEl = document.getElementById('cfg-cache-strategy');
+
+    if (healEl) healEl.checked = cfg.autoHealEnabled !== false;
+    if (killEl) killEl.checked = cfg.autoKillPort !== false;
+    if (retriesEl) retriesEl.value = cfg.maxRetries || 3;
+    if (strategyEl) strategyEl.value = cfg.cacheStrategy || 'force';
+  } catch (e) {}
+}
+
+async function saveLoopEngineConfig(btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Kaydediliyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+
+  try {
+    const cfg = {
+      autoHealEnabled: document.getElementById('cfg-auto-heal-enabled')?.checked ?? true,
+      autoKillPort: document.getElementById('cfg-auto-kill-port')?.checked ?? true,
+      maxRetries: parseInt(document.getElementById('cfg-max-retries')?.value || '3', 10),
+      cacheStrategy: document.getElementById('cfg-cache-strategy')?.value || 'force'
+    };
+
+    const res = await fetch(`${API_BASE}/api/loop/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Kaydedilemedi');
+    showToast(data.message || '🌀 Loop Engine ayarları başarıyla kaydedildi.');
+  } catch (e) {
+    showToast('⚠️ Ayar kaydetme hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+async function runLoopVerification(btnEl) {
+  const repoName = document.getElementById('verify-repo-select')?.value || '';
+  const cmd = document.getElementById('verify-cmd-input')?.value || '';
+  const outputEl = document.getElementById('verify-output-log');
+  const statusLabel = document.getElementById('verify-status-label');
+  const exitCodeLabel = document.getElementById('verify-exit-code-label');
+
+  if (!cmd.trim()) {
+    showToast('⚠️ Lütfen bir doğrulama komutu girin.');
+    return;
+  }
+
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> Çalıştırılıyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+
+  if (outputEl) outputEl.textContent = 'Komut çalıştırılıyor, lütfen bekleyin...';
+  if (statusLabel) statusLabel.textContent = 'Çalışıyor...';
+
+  try {
+    const res = await fetch(`${API_BASE}/api/loop/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: repoName, command: cmd })
+    });
+    const data = await res.json();
+    if (statusLabel) {
+      statusLabel.textContent = data.passed ? '🟢 BAŞARILI (Passed)' : '🔴 BAŞARISIZ (Failed)';
+      statusLabel.className = data.passed ? 'font-bold text-emerald-400 font-mono' : 'font-bold text-red-400 font-mono';
+    }
+    if (exitCodeLabel) exitCodeLabel.textContent = `Exit Code: ${data.exitCode ?? -1}`;
+    if (outputEl) outputEl.textContent = data.output || '(Çıktı üretilmedi)';
+    showToast(data.passed ? '✅ Doğrulama testi başarılı!' : '⚠️ Doğrulama testi başarısız oldu.');
+  } catch (e) {
+    if (statusLabel) statusLabel.textContent = '⚠️ Hata';
+    if (outputEl) outputEl.textContent = 'Hata: ' + e.message;
+    showToast('⚠️ Çalıştırma hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+async function triggerManualAutoHeal(btnEl) {
+  const repoName = document.getElementById('auto-heal-repo-select')?.value;
+  if (!repoName) {
+    showToast('⚠️ Lütfen iyileştirilecek bir repo seçin.');
+    return;
+  }
+
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> İyileştiriliyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/loop/auto-heal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: repoName, reason: 'manual_simulator' })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'İyileştirme başarısız');
+    showToast(data.message || `🌀 '${repoName}' başarıyla iyileştirildi.`);
+    fetchLoopTelemetry();
+  } catch (e) {
+    showToast('⚠️ İyileştirme hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+async function fetchLoopTelemetry() {
+  const container = document.getElementById('loop-telemetry-output');
+  if (!container) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/activity`);
+    if (!res.ok) return;
+    const list = await res.json() || [];
+    container.textContent = list.map(item => `[${item.timestamp}] ${item.type.toUpperCase()}: ${item.message}`).join('\n') || 'Henüz telemetri verisi yok.';
+  } catch (e) {}
+}
+
+async function initLoopEnginePage() {
+  refreshLoopHeartbeat();
+  loadLoopEngineConfig();
+  fetchLoopTelemetry();
+
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/scan`);
+    if (res.ok) {
+      const repos = await res.json() || [];
+      const verifySelect = document.getElementById('verify-repo-select');
+      const healSelect = document.getElementById('auto-heal-repo-select');
+
+      const optionsHtml = repos.map(r => `<option value="${escapeHtml(r.name)}">${escapeHtml(r.name)} (${r.repoTypeLabel || 'Repo'})</option>`).join('');
+
+      if (verifySelect) verifySelect.innerHTML = `<option value="">(Proje Seçilmedi - Ana Dizin)</option>${optionsHtml}`;
+      if (healSelect) healSelect.innerHTML = repos.length ? optionsHtml : '<option value="">Hiç repo bulunamadı</option>';
+    }
+  } catch (e) {}
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   renderMcps();
   renderSkills();
@@ -1600,6 +1807,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   if (document.getElementById('library-scan-body')) loadLibraryScan();
+  if (document.getElementById('loop-status-val')) initLoopEnginePage();
   if (document.getElementById('activity-log-output')) {
     loadActivityLog();
     setInterval(loadActivityLog, 30000);

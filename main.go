@@ -188,12 +188,20 @@ var (
 	runningAppsMux sync.RWMutex
 )
 
+type LoopEngineConfig struct {
+	AutoHealEnabled bool   `json:"autoHealEnabled"`
+	AutoKillPort    bool   `json:"autoKillPort"`
+	MaxRetries      int    `json:"maxRetries"`
+	CacheStrategy   string `json:"cacheStrategy"`
+}
+
 type StateBundle struct {
-	McpServers       []MCPEntry     `json:"mcpServers"`
-	RecommendedRepos []SkillEntry   `json:"recommendedRepos"`
-	IdePaths         []IdePathEntry `json:"idePaths"`
-	TrackedRepos     []TrackedRepo  `json:"trackedRepos"`
-	DeletedIdeIDs    []string       `json:"deletedIdeIds,omitempty"`
+	McpServers       []MCPEntry       `json:"mcpServers"`
+	RecommendedRepos []SkillEntry     `json:"recommendedRepos"`
+	IdePaths         []IdePathEntry   `json:"idePaths"`
+	TrackedRepos     []TrackedRepo    `json:"trackedRepos"`
+	DeletedIdeIDs    []string         `json:"deletedIdeIds,omitempty"`
+	LoopConfig       LoopEngineConfig `json:"loopConfig,omitempty"`
 }
 
 // ---------- Path helpers (AI_TOOLKIT_TEST_HOME lets tests point at a scratch dir) ----------
@@ -2235,6 +2243,44 @@ func handleLoopVerify(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleLoopConfig(w http.ResponseWriter, r *http.Request) {
+	s, err := loadState()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
+	if r.Method == http.MethodPost {
+		var cfg LoopEngineConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			writeErr(w, 400, "geçersiz ayarlar: "+err.Error())
+			return
+		}
+		s.LoopConfig = cfg
+		if err := saveState(s); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{
+			"ok":      true,
+			"config":  s.LoopConfig,
+			"message": "🌀 WyvDev Agentic Loop Engine ayarları kaydedildi.",
+		})
+		return
+	}
+
+	if s.LoopConfig.MaxRetries == 0 {
+		s.LoopConfig = LoopEngineConfig{
+			AutoHealEnabled: true,
+			AutoKillPort:    true,
+			MaxRetries:      3,
+			CacheStrategy:   "force",
+		}
+	}
+
+	writeJSON(w, 200, s.LoopConfig)
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -2291,6 +2337,8 @@ func runServer() {
 	mux.HandleFunc("GET /api/loop/heartbeat", handleLoopHeartbeat)
 	mux.HandleFunc("POST /api/loop/auto-heal", handleLoopAutoHeal)
 	mux.HandleFunc("POST /api/loop/verify", handleLoopVerify)
+	mux.HandleFunc("GET /api/loop/config", handleLoopConfig)
+	mux.HandleFunc("POST /api/loop/config", handleLoopConfig)
 	mux.HandleFunc("GET /api/github/search", handleGithubSearch)
 	mux.HandleFunc("POST /api/skills/install", handleSkillInstall)
 	mux.Handle("/", http.FileServer(http.Dir(baseDir)))

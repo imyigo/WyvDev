@@ -1,0 +1,232 @@
+﻿<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WyvDev — Agentic Loop Engine</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="brand">
+      <div class="brand-icon">
+        <div class="brand-inner">
+          <i data-lucide="zap" class="w-5 h-5 text-amber-400"></i>
+        </div>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="font-bold text-base text-gray-100 tracking-wide">WyvDev Hub</h1>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+            🌀 Agentic Loop Engine
+          </span>
+        </div>
+        <p class="text-[11px] text-gray-400">Autonomous AI Agent Infrastructure & Control Plane</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <button onclick="toggleAppLanguage()" id="lang-toggle-btn" class="px-2.5 py-1.5 rounded-xl text-xs font-bold bg-gray-800 hover:bg-gray-700 text-cyan-300 border border-gray-700 cursor-pointer flex items-center gap-1.5 transition-all">
+        <i data-lucide="globe" class="w-3.5 h-3.5"></i> <span id="current-lang-text">TR</span>
+      </button>
+
+      <span id="backend-status-pill" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30">🔴 Backend Bağlı Değil</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="menu-group">
+        <div class="menu-title">Yönetim Paneli</div>
+        <a href="index.html" class="nav-item">
+          <i data-lucide="layout-grid" class="w-4 h-4"></i>
+          <span>Yerel Kütüphane</span>
+        </a>
+        <a href="loop.html" class="nav-item active">
+          <i data-lucide="rotate-cw" class="w-4 h-4 text-indigo-400"></i>
+          <span>🌀 Loop Engine</span>
+        </a>
+        <a href="search.html" class="nav-item">
+          <i data-lucide="search" class="w-4 h-4"></i>
+          <span>GitHub Arama</span>
+        </a>
+        <a href="paths.html" class="nav-item">
+          <i data-lucide="folder-tree" class="w-4 h-4"></i>
+          <span>IDE Yolları</span>
+        </a>
+        <a href="settings.html" class="nav-item">
+          <i data-lucide="settings" class="w-4 h-4"></i>
+          <span>Sistem & Teşhis</span>
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <div class="max-w-6xl mx-auto space-y-6">
+
+        <!-- Banner & Live Heartbeat Header -->
+        <div class="p-5 rounded-2xl bg-gradient-to-r from-indigo-950/60 via-purple-950/40 to-gray-950/80 border border-indigo-500/40 shadow-2xl space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <div class="space-y-1">
+              <div class="flex items-center gap-2">
+                <span class="w-3 h-3 rounded-full bg-emerald-400 animate-ping"></span>
+                <h2 class="font-bold text-lg text-gray-100 flex items-center gap-2">
+                  🌀 WyvDev Agentic Loop Control Plane
+                </h2>
+              </div>
+              <p class="text-xs text-gray-300 max-w-2xl leading-relaxed">
+                Antigravity, Cursor, Claude Code ve Cline gibi otonom yapay zeka agent'larının (Loop) sisteminizdeki projeleri ve portları kırılmadan yönetmesini sağlayan canlı kontrol merkezi.
+              </p>
+            </div>
+            <button onclick="refreshLoopHeartbeat(this)" class="px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-2 shadow-lg transition-all active:scale-95 cursor-pointer">
+              <i data-lucide="refresh-cw" class="w-4 h-4"></i> Heartbeat Yenile
+            </button>
+          </div>
+
+          <!-- Quick Metrics Bar -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+            <div class="p-3 rounded-xl bg-gray-900/80 border border-gray-800 text-center">
+              <span class="text-[10px] text-gray-400 block uppercase font-mono">Loop Engine Durumu</span>
+              <span id="loop-status-val" class="font-bold text-emerald-400 text-sm">🟢 Aktif</span>
+            </div>
+            <div class="p-3 rounded-xl bg-gray-900/80 border border-gray-800 text-center">
+              <span class="text-[10px] text-gray-400 block uppercase font-mono">Çalışan Servisler</span>
+              <span id="loop-active-apps-val" class="font-bold text-cyan-300 text-sm">0 Uygulama</span>
+            </div>
+            <div class="p-3 rounded-xl bg-gray-900/80 border border-gray-800 text-center">
+              <span class="text-[10px] text-gray-400 block uppercase font-mono">Senkronize IDE'ler</span>
+              <span id="loop-ides-val" class="font-bold text-purple-300 text-sm">0 Konfigürasyon</span>
+            </div>
+            <div class="p-3 rounded-xl bg-gray-900/80 border border-gray-800 text-center">
+              <span class="text-[10px] text-gray-400 block uppercase font-mono">Son Yanıt Süresi</span>
+              <span id="loop-latency-val" class="font-bold text-amber-300 text-sm font-mono">&lt; 1 ms</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Deep Configuration Settings -->
+        <div class="bg-gray-900/40 p-5 rounded-2xl border border-gray-800 space-y-4">
+          <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+            <div>
+              <h3 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+                <i data-lucide="sliders" class="w-4 h-4 text-cyan-400"></i> Derin Otonom İyileştirme Ayarları
+              </h3>
+              <p class="text-xs text-gray-400">Agent döngüsünde bir uygulama çöktüğünde WyvDev'in alacağı otomatik aksiyonlar.</p>
+            </div>
+            <button onclick="saveLoopEngineConfig(this)" class="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 shadow-lg cursor-pointer transition-all active:scale-95">
+              <i data-lucide="save" class="w-4 h-4"></i> Ayarları Kaydet
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+            <div class="p-4 rounded-xl bg-gray-950/60 border border-gray-800 space-y-3">
+              <label class="flex items-center justify-between cursor-pointer">
+                <div>
+                  <span class="font-bold text-gray-200 block">Çökmede Otomatik İyileştirme (Auto-Heal)</span>
+                  <span class="text-[11px] text-gray-400">Bir servis hata verdiğinde WyvDev otomatik önbellek temizler ve paketi zorla yeniden kurar.</span>
+                </div>
+                <input type="checkbox" id="cfg-auto-heal-enabled" checked class="w-4 h-4 accent-indigo-500 rounded cursor-pointer" />
+              </label>
+
+              <label class="flex items-center justify-between cursor-pointer pt-2 border-t border-gray-800/60">
+                <div>
+                  <span class="font-bold text-gray-200 block">Otomatik Port Serbest Bırakma</span>
+                  <span class="text-[11px] text-gray-400">Port çakışmasında çakışan eski süreci `taskkill` ile otomatik sonlandırır.</span>
+                </div>
+                <input type="checkbox" id="cfg-auto-kill-port" checked class="w-4 h-4 accent-indigo-500 rounded cursor-pointer" />
+              </label>
+            </div>
+
+            <div class="p-4 rounded-xl bg-gray-950/60 border border-gray-800 space-y-3">
+              <div>
+                <label class="font-bold text-gray-200 block mb-1">Maksimum Otomatik Onarım Deneme Sayısı</label>
+                <input type="number" id="cfg-max-retries" value="3" min="1" max="10" class="w-full glass-input px-3 py-1.5 rounded-lg text-xs font-mono text-cyan-300" />
+                <span class="text-[10px] text-gray-400">Bir proje çöktüğünde üst üste en fazla kaç kez otonom iyileştirme denenecek.</span>
+              </div>
+
+              <div>
+                <label class="font-bold text-gray-200 block mb-1">Önbellek Temizleme Stratejisi</label>
+                <select id="cfg-cache-strategy" class="w-full glass-input px-3 py-1.5 rounded-lg text-xs font-mono text-gray-200">
+                  <option value="force">⚡ Force Clean (Önerilen - Güçlü Yeniden Kurulum)</option>
+                  <option value="standard">Standard (Sadece Paketleri Güncelle)</option>
+                  <option value="deep">Deep Clean (Tüm node_modules / .venv Sil ve Kur)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Verification & Test Sandbox -->
+        <div class="bg-gray-900/40 p-5 rounded-2xl border border-gray-800 space-y-4">
+          <div>
+            <h3 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+              <i data-lucide="flask-conical" class="w-4 h-4 text-amber-400"></i> Otonom Doğrulama & Test Laboratuvarı (Verification Sandbox)
+            </h3>
+            <p class="text-xs text-gray-400">AI Agent'ın döngü içinde çalıştırdığı doğrulama komutlarını canlı test edin (POST /api/loop/verify).</p>
+          </div>
+
+          <div class="flex items-center gap-2 flex-wrap">
+            <select id="verify-repo-select" class="glass-input px-3 py-2 rounded-xl text-xs font-mono text-gray-200 min-w-[160px]">
+              <option value="">(Proje Seçilmedi - Ana Dizin)</option>
+            </select>
+            <input type="text" id="verify-cmd-input" placeholder="Örn: go build -o test.exe main.go veya npm test" value="go build -o test.exe main.go" class="flex-1 glass-input px-3.5 py-2 rounded-xl text-xs font-mono text-gray-100" />
+            <button onclick="runLoopVerification(this)" class="px-4 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-1.5 shadow-lg cursor-pointer transition-all active:scale-95 shrink-0">
+              <i data-lucide="play" class="w-4 h-4 fill-current"></i> Doğrulamayı Çalıştır
+            </button>
+          </div>
+
+          <div class="p-3.5 rounded-xl bg-gray-950/80 border border-gray-800 space-y-2">
+            <div class="flex items-center justify-between text-[11px]">
+              <span class="font-bold text-gray-300 font-mono" id="verify-status-label">Bekliyor...</span>
+              <span class="text-[10px] font-mono text-gray-400" id="verify-exit-code-label">Exit Code: -</span>
+            </div>
+            <pre id="verify-output-log" class="font-mono text-[11px] text-gray-300 max-h-48 overflow-y-auto whitespace-pre-wrap break-all p-2 rounded bg-black/40 border border-gray-800">Komut çıktısı burada görünecektir...</pre>
+          </div>
+        </div>
+
+        <!-- Manual Auto-Heal Simulator -->
+        <div class="bg-gray-900/40 p-5 rounded-2xl border border-gray-800 space-y-4">
+          <div>
+            <h3 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+              <i data-lucide="wrench" class="w-4 h-4 text-emerald-400"></i> Manuel Otonom İyileştirme Simülatörü (Auto-Heal Simulator)
+            </h3>
+            <p class="text-xs text-gray-400">Bir projeyi seçerek WyvDev'in otonom onarım motorunu (`POST /api/loop/auto-heal`) manuel tetikleyin.</p>
+          </div>
+
+          <div class="flex items-center gap-3 flex-wrap">
+            <select id="auto-heal-repo-select" class="flex-1 glass-input px-3.5 py-2 rounded-xl text-xs font-mono text-gray-200">
+              <option value="">Taranan projeler yükleniyor...</option>
+            </select>
+            <button onclick="triggerManualAutoHeal(this)" class="px-5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white flex items-center gap-2 shadow-lg cursor-pointer transition-all active:scale-95 shrink-0">
+              <i data-lucide="zap" class="w-4 h-4 fill-current"></i> 🌀 Otonom İyileştir
+            </button>
+          </div>
+        </div>
+
+        <!-- Live Loop Telemetry Stream -->
+        <div class="bg-gray-900/40 p-5 rounded-2xl border border-gray-800 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+              <i data-lucide="activity" class="w-4 h-4 text-purple-400"></i> Loop Engine Canlı Telemetri Günlüğü
+            </h3>
+            <button onclick="fetchLoopTelemetry()" class="text-xs font-bold text-purple-400 hover:text-purple-300 flex items-center gap-1 cursor-pointer">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Yenile
+            </button>
+          </div>
+          <p class="text-xs text-gray-400">Yapay zeka agent'larının WyvDev üzerinden tetiklediği tüm döngü, heartbeat ve auto-heal olayları.</p>
+          <pre id="loop-telemetry-output" class="glass-input font-mono text-[11px] p-3 max-h-64 overflow-y-auto whitespace-pre-wrap break-all text-purple-200">Telemetri verisi bekleniyor...</pre>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
