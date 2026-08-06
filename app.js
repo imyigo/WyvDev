@@ -1,4 +1,112 @@
-// AI Toolkit Hub — Visual MCP Store & mcpservers.org Inspired Engine
+// WyvDev — Visual MCP Store & Local Developer PaaS Engine
+
+// ---------- WyvDev i18n Translation Engine (TR / EN) ----------
+const I18N_DICTIONARY = {
+  tr: {
+    nav_library: "Yerel Kütüphane",
+    nav_loop: "🌀 Loop Engine",
+    nav_search: "GitHub Arama",
+    nav_paths: "IDE Dosya Yolları",
+    nav_settings: "Sistem & Teşhis",
+    backend_connected: "🟢 Backend Bağlı",
+    backend_disconnected: "🔴 Backend Bağlı Değil",
+    add_mcp_btn: "Yeni MCP Ekle",
+    json_edit_btn: "JSON Düzenle / İndir",
+    reset_defaults_btn: "Varsayılan Ayarlara Sıfırla",
+    type_filter_label: "Tür:",
+    sort_label: "Sırala:",
+    filter_all: "Tüm Türler",
+    filter_service: "⚡ Service & App",
+    filter_mcp: "🔌 MCP Server",
+    filter_skill: "📄 Skill",
+    filter_lib: "📦 Library",
+    filter_other: "📁 Diğer",
+    sort_name: "İsme Göre (A-Z)",
+    sort_running: "🟢 Önce Çalışanlar",
+    sort_installed: "✓ Önce Yüklü Olanlar",
+    sort_type: "Türe Göre",
+    view_table: "Tablo",
+    view_grid: "Kartlar",
+    btn_start: "🚀 Başlat",
+    btn_stop: "🛑 Durdur",
+    btn_repair: "🔧 Onar",
+    btn_install: "⚡ Kur",
+    btn_installed: "✓ Yüklü",
+    status_running: "🟢 Çalışıyor",
+    status_stopped: "⚪ Durduruldu",
+    status_error: "⚠️ Hata",
+    toast_lang_changed: "🌐 Uygulama dili Türkçe olarak ayarlandı."
+  },
+  en: {
+    nav_library: "Local Library",
+    nav_loop: "🌀 Loop Engine",
+    nav_search: "GitHub Search",
+    nav_paths: "IDE File Paths",
+    nav_settings: "System & Health",
+    backend_connected: "🟢 Backend Connected",
+    backend_disconnected: "🔴 Backend Disconnected",
+    add_mcp_btn: "Add New MCP",
+    json_edit_btn: "Edit / Download JSON",
+    reset_defaults_btn: "Reset to Defaults",
+    type_filter_label: "Type:",
+    sort_label: "Sort By:",
+    filter_all: "All Types",
+    filter_service: "⚡ Service & App",
+    filter_mcp: "🔌 MCP Server",
+    filter_skill: "📄 Skill",
+    filter_lib: "📦 Library",
+    filter_other: "📁 Other",
+    sort_name: "By Name (A-Z)",
+    sort_running: "🟢 Running First",
+    sort_installed: "✓ Installed First",
+    sort_type: "By Type",
+    view_table: "Table",
+    view_grid: "Cards",
+    btn_start: "🚀 Start",
+    btn_stop: "🛑 Stop",
+    btn_repair: "🔧 Repair",
+    btn_install: "⚡ Install",
+    btn_installed: "✓ Installed",
+    status_running: "🟢 Running",
+    status_stopped: "⚪ Stopped",
+    status_error: "⚠️ Error",
+    toast_lang_changed: "🌐 Switched language to English."
+  }
+};
+
+let currentLang = localStorage.getItem('wyvdev_lang') || 'tr';
+
+function t(key) {
+  const dict = I18N_DICTIONARY[currentLang] || I18N_DICTIONARY.tr;
+  return dict[key] || key;
+}
+
+function toggleAppLanguage() {
+  currentLang = currentLang === 'tr' ? 'en' : 'tr';
+  localStorage.setItem('wyvdev_lang', currentLang);
+  updateLanguageUI();
+  showToast(t('toast_lang_changed'));
+}
+
+function updateLanguageUI() {
+  const langTextEl = document.getElementById('current-lang-text');
+  if (langTextEl) langTextEl.innerText = currentLang.toUpperCase();
+
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const key = el.getAttribute('data-i18n');
+    if (key) {
+      const val = t(key);
+      if (val) el.textContent = val;
+    }
+  });
+
+  if (document.getElementById('library-scan-body') || document.getElementById('library-view-grid-wrapper')) {
+    renderLibraryScan();
+  }
+  if (document.getElementById('mcp-grid')) renderMcps();
+  if (document.getElementById('skills-grid')) renderSkills();
+  if (document.getElementById('ide-paths-grid')) renderIdePaths();
+}
 
 const DEFAULT_MCP_SERVERS = [
   { id: 'dokploy', name: 'Dokploy PaaS', type: 'stdio', command: 'npx', args: ['-y', '@dokploy/mcp'], desc: 'Dokploy PaaS self-host uygulama ve veritabanı paneli yönetimi.', category: 'DevOps', badge: 'Self-Host', icon: 'cloud-cog', iconColor: 'text-indigo-400', auth: true, env: { DOKPLOY_URL: 'https://dokploy.domain.com/api', DOKPLOY_API_KEY: '' } },
@@ -85,10 +193,10 @@ function setBackendStatus(online) {
   const pill = document.getElementById('backend-status-pill');
   if (!pill) return;
   if (online) {
-    pill.textContent = '🟢 Backend Bağlı';
+    pill.textContent = t('backend_connected');
     pill.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30';
   } else {
-    pill.textContent = '🔴 Backend Bağlı Değil';
+    pill.textContent = t('backend_disconnected');
     pill.className = 'text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30';
   }
 }
