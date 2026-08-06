@@ -1,0 +1,14 @@
+# Local server state (contains API keys typed into the panel — never commit)
+core/state.json
+core/activity.log
+
+# Cloned/tracked repos (machine-local)
+repo/*
+!repo/.gitkeep
+
+# Danger Zone zip backups — kept out of repo/ on purpose (repo/ is only for cloned skills/MCP)
+backups/*
+!backups/.gitkeep
+
+# Go build artifacts
+ai-toolkit.exe

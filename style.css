@@ -1,0 +1,213 @@
+/* AI Toolkit Hub — Ultra Modern Dark Glassmorphism CSS */
+:root {
+  --bg-main: #0a0d14;
+  --bg-sidebar: #0e121d;
+  --bg-card: rgba(18, 24, 38, 0.8);
+  --border-card: rgba(255, 255, 255, 0.08);
+  --accent-cyan: #06b6d4;
+  --accent-indigo: #6366f1;
+  --accent-emerald: #10b981;
+  --accent-amber: #f59e0b;
+  --text-main: #f3f4f6;
+  --text-muted: #9ca3af;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-main);
+}
+::-webkit-scrollbar-thumb {
+  background: #1f293d;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #374151;
+}
+
+/* Header styling */
+.header {
+  height: 64px;
+  border-bottom: 1px solid var(--border-card);
+  background: rgba(12, 16, 25, 0.95);
+  backdrop-filter: blur(12px);
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
+  padding: 1px;
+}
+
+.brand-inner {
+  width: 100%;
+  height: 100%;
+  background: var(--bg-main);
+  border-radius: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: justify-center;
+  color: var(--accent-cyan);
+}
+
+/* Layout */
+.layout {
+  display: flex;
+  flex: 1;
+}
+
+.sidebar {
+  width: 260px;
+  border-right: 1px solid var(--border-card);
+  background: var(--bg-sidebar);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.menu-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.menu-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  padding: 0 12px;
+  margin-bottom: 8px;
+}
+
+.nav-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.nav-btn:hover {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.nav-btn.active {
+  color: var(--accent-cyan);
+  background: rgba(6, 182, 212, 0.12);
+  border-color: rgba(6, 182, 212, 0.3);
+}
+
+.main-content {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+  max-height: calc(100vh - 64px);
+}
+
+/* Cards & Glassmorphism */
+.glass-card {
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-card);
+  border-radius: 14px;
+  padding: 20px;
+  transition: all 0.2s ease-in-out;
+}
+
+.glass-card:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 8px 24px -6px rgba(0, 0, 0, 0.4);
+}
+
+.glass-input {
+  background: rgba(10, 13, 20, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text-main);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: monospace;
+  font-size: 12px;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.2s ease;
+}
+
+.glass-input:focus {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(6, 182, 212, 0.25);
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(8px);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.modal-content {
+  background: #0e1320;
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  border-radius: 16px;
+  width: 100%;
+  max-width: 750px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+}
+
+.hidden {
+  display: none !important;
+}

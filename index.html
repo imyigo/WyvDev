@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Toolkit — MCP, Skills & Kütüphane</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="brand">
+      <div class="brand-icon">
+        <div class="brand-inner">
+          <i data-lucide="zap" class="w-5 h-5 text-amber-400"></i>
+        </div>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="font-bold text-base text-gray-100 tracking-wide">WyvDev Hub</h1>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">
+            Local PaaS & MCP Engine
+          </span>
+        </div>
+        <p class="text-[11px] text-gray-400">Local Developer PaaS & Universal MCP Orchestrator</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <button onclick="toggleAppLanguage()" id="lang-toggle-btn" class="px-2.5 py-1.5 rounded-xl text-xs font-bold bg-gray-800 hover:bg-gray-700 text-cyan-300 border border-gray-700 cursor-pointer flex items-center gap-1.5 transition-all">
+        <i data-lucide="globe" class="w-3.5 h-3.5"></i> <span id="current-lang-text">TR</span>
+      </button>
+
+      <span id="backend-status-pill" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30">🔴 Backend Bağlı Değil</span>
+
+      <button onclick="openAddMcpModal()" class="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg cursor-pointer transition-all active:scale-95">
+        <i data-lucide="plus-circle" class="w-4 h-4"></i>
+        <span>Yeni MCP Ekle</span>
+      </button>
+
+      <button onclick="openJsonModal()" class="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white shadow-lg cursor-pointer transition-all active:scale-95">
+        <i data-lucide="file-json" class="w-4 h-4"></i>
+        <span>JSON Düzenle / İndir</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="menu-group">
+        <p class="menu-title">Görsel Yönetim Paneli</p>
+
+        <a href="index.html" class="nav-btn active">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="server" class="w-4 h-4 text-cyan-400"></i>
+            <span>Repos</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <span id="mcp-count-badge" class="text-[10px] font-bold px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300">11</span>
+            <span id="skill-count-badge" class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300">12</span>
+          </div>
+        </a>
+
+        <a href="search.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="search" class="w-4 h-4 text-purple-400"></i>
+            <span>Arama Kataloğu</span>
+          </div>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300">Canlı</span>
+        </a>
+
+        <a href="paths.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="folder-git-2" class="w-4 h-4 text-indigo-400"></i>
+            <span>IDE Dosya Yolları</span>
+          </div>
+        </a>
+
+        <a href="settings.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="settings" class="w-4 h-4 text-amber-400"></i>
+            <span>Ayarlar</span>
+          </div>
+        </a>
+      </div>
+
+      <div class="space-y-2">
+        <button onclick="resetToDefaultMcps()" class="w-full text-left text-[11px] text-gray-500 hover:text-red-400 flex items-center gap-1.5 px-3 py-1.5 rounded cursor-pointer transition-colors">
+          <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> Varsayılan Ayarlara Sıfırla
+        </button>
+
+        <div class="p-3.5 rounded-xl bg-gray-900/60 border border-gray-800 text-[11px] text-gray-400 space-y-2">
+          <p class="font-semibold text-gray-200 flex items-center gap-1.5">
+            <i data-lucide="shield-check" class="w-3.5 h-3.5 text-cyan-400"></i> Tek Panelde Hepsi
+          </p>
+          <p class="leading-relaxed text-gray-400">
+            <code class="font-mono">repo/</code> altına inen her şey — MCP, Skill, Node/Python/Rust/Docker projesi — otomatik tespit edilip tek yerden yapılandırılır. Yeni eklemek için Arama Kataloğu'nu kullanın.
+          </p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main View -->
+    <main class="main-content">
+      <div class="space-y-6">
+
+        <!-- Local Library (repo/ folder auto-detect) -->
+        <div class="bg-gray-900/40 p-4 rounded-2xl border border-gray-800 space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-3">
+            <div>
+              <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+                <i data-lucide="folder-open" class="w-4 h-4 text-amber-400"></i> Yerel Kütüphane (repo/ Klasörü)
+              </h2>
+              <p class="text-xs text-gray-400 mt-0.5"><code class="font-mono">repo/</code> altındaki tüm projeler otomatik taranır, türleri etiketlenir ve tek tıkla yönetilir.</p>
+            </div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <button onclick="checkAllRepoUpdates(this)" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-1.5 cursor-pointer shadow-lg transition-all active:scale-95">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Tüm Güncellemeleri Denetle
+              </button>
+            </div>
+          </div>
+
+          <!-- Controls: Filter by Type, Sort, View Switcher -->
+          <div class="flex items-center justify-between flex-wrap gap-2.5 pt-1 border-t border-gray-800/80">
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="flex items-center gap-1.5 bg-gray-950/60 px-2.5 py-1 rounded-xl border border-gray-800">
+                <span class="text-[10px] text-gray-400 font-semibold">Tür:</span>
+                <select id="repo-type-filter" onchange="renderLibraryScan()" class="bg-transparent text-xs text-gray-200 focus:outline-none cursor-pointer">
+                  <option value="all">Tüm Türler</option>
+                  <option value="service">⚡ Service & App</option>
+                  <option value="mcp">🔌 MCP Server</option>
+                  <option value="skill">📄 Skill</option>
+                  <option value="library">📦 Library</option>
+                  <option value="other">📁 Diğer</option>
+                </select>
+              </div>
+
+              <div class="flex items-center gap-1.5 bg-gray-950/60 px-2.5 py-1 rounded-xl border border-gray-800">
+                <span class="text-[10px] text-gray-400 font-semibold">Sırala:</span>
+                <select id="repo-sort-by" onchange="renderLibraryScan()" class="bg-transparent text-xs text-gray-200 focus:outline-none cursor-pointer">
+                  <option value="name">İsme Göre (A-Z)</option>
+                  <option value="running">🟢 Önce Çalışanlar</option>
+                  <option value="installed">✓ Önce Yüklü Olanlar</option>
+                  <option value="type">Türe Göre</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- View Switcher (Table vs Grid) -->
+            <div class="flex items-center gap-1 bg-gray-950/80 p-1 rounded-xl border border-gray-800">
+              <button id="view-mode-table-btn" onclick="setLibraryViewMode('table')" class="px-2.5 py-1 rounded-lg text-xs font-semibold bg-gray-800 text-cyan-300 flex items-center gap-1 cursor-pointer">
+                <i data-lucide="table" class="w-3.5 h-3.5"></i> Tablo
+              </button>
+              <button id="view-mode-grid-btn" onclick="setLibraryViewMode('grid')" class="px-2.5 py-1 rounded-lg text-xs font-semibold text-gray-400 hover:text-white flex items-center gap-1 cursor-pointer">
+                <i data-lucide="layout-grid" class="w-3.5 h-3.5"></i> Kartlar
+              </button>
+            </div>
+          </div>
+
+          <!-- View Containers -->
+          <div id="library-view-table-wrapper" class="overflow-x-auto">
+            <table class="w-full text-left">
+              <thead>
+                <tr class="text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-800/80">
+                  <th class="py-2.5 px-3">Klasör & Proje</th>
+                  <th class="py-2.5 px-3">Repo Türü & Motorlar</th>
+                  <th class="py-2.5 px-3">Kurulum & Bağımlılıklar (Install)</th>
+                  <th class="py-2.5 px-3 text-right">Başlat & İşlemler</th>
+                </tr>
+              </thead>
+              <tbody id="library-scan-body"></tbody>
+            </table>
+          </div>
+
+          <div id="library-view-grid-wrapper" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 hidden"></div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Modal 1: JSON Editor -->
+  <div id="json-modal" class="modal-overlay hidden">
+    <div class="modal-content">
+      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+        <h3 class="font-bold text-sm text-cyan-300 flex items-center gap-2">
+          <i data-lucide="file-json" class="w-4 h-4"></i> MCP JSON Konfigürasyon Editörü
+        </h3>
+        <button onclick="closeModal()" class="text-gray-400 hover:text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <textarea id="json-output" class="glass-input h-72 font-mono text-xs text-emerald-300 p-4 leading-relaxed resize-none"></textarea>
+      <div class="flex items-center justify-between pt-2">
+        <p class="text-xs text-gray-400">JSON kodunu düzenleyip <strong>"Değişiklikleri Uygula"</strong> butonuna basabilirsiniz.</p>
+        <div class="flex items-center gap-2">
+          <button onclick="applyRawJson()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer shadow-lg">
+            Değişiklikleri Uygula & Kaydet
+          </button>
+          <button onclick="copyToClipboard()" class="px-3 py-2 rounded-xl text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white cursor-pointer">
+            Panoya Kopyala
+          </button>
+          <button onclick="downloadJsonFile()" class="px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer">
+            İndir
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 2: Skill Install Result -->
+  <div id="install-result-modal" class="modal-overlay hidden">
+    <div class="modal-content max-w-xl">
+      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+        <h3 id="install-result-title" class="font-bold text-sm text-emerald-300 flex items-center gap-2">Kurulum Sonucu</h3>
+        <button onclick="closeInstallResultModal()" class="text-gray-400 hover:text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+      <div class="space-y-1">
+        <label class="text-[10px] font-mono text-gray-400">Çalıştırılan komut:</label>
+        <p id="install-result-command" class="glass-input font-mono text-xs py-2 break-all"></p>
+      </div>
+      <div class="space-y-1">
+        <label class="text-[10px] font-mono text-gray-400">Çıktı:</label>
+        <pre id="install-result-output" class="glass-input font-mono text-[11px] p-3 max-h-72 overflow-y-auto whitespace-pre-wrap break-all"></pre>
+      </div>
+      <div class="flex justify-end pt-2 border-t border-gray-800">
+        <button onclick="closeInstallResultModal()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Kapat</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal 3: Add New MCP Server -->
+  <div id="add-mcp-modal" class="modal-overlay hidden">
+    <div class="modal-content max-w-lg">
+      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
+        <h3 class="font-bold text-sm text-emerald-300 flex items-center gap-2">
+          <i data-lucide="plus-circle" class="w-4 h-4"></i> Yeni MCP Sunucusu Ekle
+        </h3>
+        <button onclick="closeAddMcpModal()" class="text-gray-400 hover:text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+
+      <div class="space-y-3 text-xs">
+        <div class="space-y-1">
+          <label class="text-gray-300 font-medium">MCP ID (benzersiz, küçük harf):</label>
+          <input id="new-mcp-id" type="text" placeholder="örnek: my-custom-mcp" class="glass-input font-mono" />
+        </div>
+
+        <div class="space-y-1">
+          <label class="text-gray-300 font-medium">Sunucu İçi Adı:</label>
+          <input id="new-mcp-name" type="text" placeholder="örnek: Custom Service MCP" class="glass-input" />
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div class="space-y-1">
+            <label class="text-gray-300 font-medium">Bağlantı Tipi:</label>
+            <select id="new-mcp-type" class="glass-input">
+              <option value="stdio">stdio (Komut Satırı / npx / uvx)</option>
+              <option value="http">http (Uzak URL Endpoint)</option>
+            </select>
+          </div>
+          <div class="space-y-1">
+            <label class="text-gray-300 font-medium">Kategori:</label>
+            <select id="new-mcp-category" class="glass-input">
+              <option value="DevOps">DevOps</option>
+              <option value="Marketing">Marketing</option>
+              <option value="Database">Database</option>
+              <option value="Utility">Utility</option>
+              <option value="Automation">Automation</option>
+              <option value="AI & Models">AI & Models</option>
+              <option value="Finance">Finance</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="space-y-1">
+          <label class="text-gray-300 font-medium">URL veya Komut + Argümanlar:</label>
+          <input id="new-mcp-target" type="text" placeholder="HTTP için https://... veya stdio için: npx -y @package/name" class="glass-input font-mono" />
+        </div>
+
+        <div class="space-y-1">
+          <label class="text-gray-300 font-medium">Açıklama (Opsiyonel):</label>
+          <input id="new-mcp-desc" type="text" placeholder="Servis hakkında kısa açıklama..." class="glass-input" />
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-3 pt-3 border-t border-gray-800">
+        <button onclick="closeAddMcpModal()" class="px-4 py-2 rounded-xl text-xs font-semibold text-gray-400 hover:text-white cursor-pointer">İptal</button>
+        <button onclick="saveNewMcp()" class="px-5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg cursor-pointer">Ekle & Kaydet</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

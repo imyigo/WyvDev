@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Toolkit — Ayarlar (Export/Import & Git Takip)</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="brand">
+      <div class="brand-icon">
+        <div class="brand-inner">
+          <i data-lucide="cpu" class="w-5 h-5"></i>
+        </div>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="font-bold text-base text-gray-100 tracking-wide">AI Toolkit Hub</h1>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
+            Ayarlar
+          </span>
+        </div>
+        <p class="text-[11px] text-gray-400">Export / Import & Git Repo Takibi</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <span id="backend-status-pill" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30">🔴 Backend Bağlı Değil</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="menu-group">
+        <p class="menu-title">Görsel Yönetim Paneli</p>
+
+        <a href="index.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="server" class="w-4 h-4 text-cyan-400"></i>
+            <span>Repos</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <span id="mcp-count-badge" class="text-[10px] font-bold px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300">11</span>
+            <span id="skill-count-badge" class="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300">12</span>
+          </div>
+        </a>
+
+        <a href="search.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="search" class="w-4 h-4 text-purple-400"></i>
+            <span>Arama Kataloğu</span>
+          </div>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300">Canlı</span>
+        </a>
+
+        <a href="paths.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="folder-git-2" class="w-4 h-4 text-indigo-400"></i>
+            <span>IDE Dosya Yolları</span>
+          </div>
+        </a>
+
+        <a href="settings.html" class="nav-btn active">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="settings" class="w-4 h-4 text-amber-400"></i>
+            <span>Ayarlar</span>
+          </div>
+        </a>
+      </div>
+
+      <div class="p-3.5 rounded-xl bg-gray-900/60 border border-gray-800 text-[11px] text-gray-400 space-y-2">
+        <p class="font-semibold text-gray-200 flex items-center gap-1.5">
+          <i data-lucide="shield-check" class="w-3.5 h-3.5 text-amber-400"></i> Akıllı İçe Aktarma
+        </p>
+        <p class="leading-relaxed text-gray-400">
+          İçe aktarılan JSON'daki her skill'in git yolu yerelde yoksa <code class="font-mono">repo/</code> altına otomatik klonlanır ve sürekli takip edilir.
+        </p>
+      </div>
+    </aside>
+
+    <!-- Main View -->
+    <main class="main-content">
+      <div class="space-y-6">
+
+        <!-- System Requirements & Runtime Diagnostics -->
+        <div class="bg-gray-900/40 p-4 rounded-2xl border border-gray-800 space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+                <i data-lucide="cpu" class="w-4 h-4 text-cyan-400"></i> Sistem Gereksinimleri & Motor Teşhisi
+              </h2>
+              <p class="text-xs text-gray-400">MCP sunucuları ve becerilerin (Skills) sorunsuz çalışması için gerekli sistem motorlarının canlı durumu.</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <span id="runtime-summary-badge" class="text-[10px] font-mono font-bold px-2.5 py-1 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                Tarama Bekleniyor...
+              </span>
+              <button onclick="loadSystemHealth(this)" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white flex items-center gap-1.5 cursor-pointer shadow-lg transition-all active:scale-95">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Motorları Yeniden Tara
+              </button>
+            </div>
+          </div>
+
+          <div id="system-health-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            <p class="text-xs text-gray-400 col-span-full text-center py-6">Sistem motorları taranıyor...</p>
+          </div>
+        </div>
+
+        <!-- Export/Import -->
+        <div class="bg-gray-900/40 p-4 rounded-2xl border border-gray-800 space-y-3">
+          <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+            <i data-lucide="file-json" class="w-4 h-4 text-amber-400"></i> Dışa / İçe Aktar
+          </h2>
+          <p class="text-xs text-gray-400">Tüm MCP sunucuları, Skills Kataloğu, IDE yolları ve takip edilen git repolarını tek bir JSON dosyası olarak yedekleyin ya da başka bir makineye taşıyın.</p>
+          <div class="flex items-center gap-3">
+            <button onclick="exportState()" class="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white shadow-lg cursor-pointer transition-all active:scale-95">
+              <i data-lucide="download" class="w-4 h-4"></i>
+              <span>JSON Olarak İndir</span>
+            </button>
+            <label class="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 shadow-lg cursor-pointer transition-all active:scale-95">
+              <i data-lucide="upload" class="w-4 h-4"></i>
+              <span>JSON İçe Aktar</span>
+              <input type="file" accept="application/json" class="hidden" onchange="importState(this.files[0])" />
+            </label>
+          </div>
+        </div>
+
+        <!-- Tracked Repos -->
+        <div class="bg-gray-900/40 p-4 rounded-2xl border border-gray-800 space-y-3">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+              <i data-lucide="git-branch" class="w-4 h-4 text-amber-400"></i> Takip Edilen Git Repoları
+            </h2>
+            <div class="flex items-center gap-2">
+              <button onclick="checkAllRepoUpdates(this)" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white flex items-center gap-1.5 cursor-pointer shadow-lg transition-all active:scale-95">
+                <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Tüm Güncellemeleri Denetle
+              </button>
+            </div>
+          </div>
+          <p class="text-xs text-gray-400">Sayfa açıkken durumlar 5 dakikada bir otomatik kontrol edilir.</p>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left">
+              <thead>
+                <tr class="text-[10px] uppercase tracking-wide text-gray-500">
+                  <th class="py-2 px-3">Repo</th>
+                  <th class="py-2 px-3">Durum</th>
+                  <th class="py-2 px-3">Son Kontrol</th>
+                  <th class="py-2 px-3 text-right">İşlemler</th>
+                </tr>
+              </thead>
+              <tbody id="tracked-repos-body"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="bg-gray-900/40 p-4 rounded-2xl border border-gray-800 space-y-3">
+          <div class="flex items-center justify-between">
+            <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+              <i data-lucide="scroll-text" class="w-4 h-4 text-amber-400"></i> Aktivite Günlüğü
+            </h2>
+            <button onclick="loadActivityLog()" class="text-xs font-bold text-amber-400 hover:text-amber-300 flex items-center gap-1 cursor-pointer">
+              <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i> Yenile
+            </button>
+          </div>
+          <p class="text-xs text-gray-400">Her sync / kurulum / klonlama / silme işlemi kalıcı olarak burada — 30 saniyede bir otomatik yenilenir.</p>
+          <pre id="activity-log-output" class="glass-input font-mono text-[11px] p-3 max-h-80 overflow-y-auto whitespace-pre-wrap break-all"></pre>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

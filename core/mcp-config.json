@@ -1,0 +1,31 @@
+{
+  "mcpServers": {
+    "meta-ads": { "type": "http", "url": "https://mcp.facebook.com/ads" },
+    "github": { "type": "http", "url": "https://api.githubcopilot.com/mcp/" },
+    "huggingface": { "type": "http", "url": "https://huggingface.co/mcp" },
+    "cloudflare": { "type": "http", "url": "https://bindings.mcp.cloudflare.com/mcp" },
+
+    "dokploy": {
+      "command": "npx", "args": ["-y", "@dokploy/mcp"],
+      "env": { "DOKPLOY_URL": "https://SENIN-DOKPLOY-DOMAININ/api", "DOKPLOY_API_KEY": "SENIN_KEYIN" }
+    },
+    "supabase-selfhost": {
+      "command": "npx", "args": ["-y", "selfhosted-supabase-mcp"],
+      "env": { "SUPABASE_URL": "https://SENIN-SUPABASE-DOMAININ", "SUPABASE_ANON_KEY": "", "SUPABASE_SERVICE_ROLE_KEY": "" }
+    },
+    "n8n": {
+      "command": "npx", "args": ["-y", "n8n-mcp"],
+      "env": { "N8N_API_URL": "https://SENIN-N8N-DOMAININ", "N8N_API_KEY": "" }
+    },
+    "ssh": {
+      "command": "npx", "args": ["-y", "ssh-mcp-server"],
+      "env": { "SSH_HOST": "", "SSH_USER": "", "SSH_KEY_PATH": "" }
+    },
+
+    "yahoo-finance": { "command": "uvx", "args": ["mcp-yahoo-finance"] },
+    "google-analytics": { "command": "pipx", "args": ["run", "analytics-mcp"] },
+    "google-ads": { "command": "python", "args": ["-m", "google_ads_mcp"] },
+    "google-search-console": { "command": "npx", "args": ["-y", "mcp-gsc"] },
+    "google-tag-manager": { "type": "http", "url": "https://gtm-mcp.stape.io/mcp" }
+  }
+}
