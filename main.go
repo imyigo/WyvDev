@@ -2400,13 +2400,194 @@ func openBrowser(url string, addr string) {
 
 const defaultPort = 47651
 
+// ---------- Startup Self-Check Engine ----------
+
+type StartupCheck struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`  // "ok", "warn", "error"
+	Message string `json:"message"`
+}
+
+type StartupReport struct {
+	Ready    bool           `json:"ready"`
+	Checks   []StartupCheck `json:"checks"`
+	DiskUsed string         `json:"diskUsed"`
+	BaseDir  string         `json:"baseDir"`
+}
+
+var startupReport StartupReport
+var startupMux sync.Mutex
+
+func handleStartupStatus(w http.ResponseWriter, r *http.Request) {
+	startupMux.Lock()
+	defer startupMux.Unlock()
+	writeJSON(w, 200, startupReport)
+}
+
+func runStartupChecks(baseDir string) {
+	checks := []StartupCheck{}
+	allOk := true
+
+	addCheck := func(name, status, msg string) {
+		checks = append(checks, StartupCheck{Name: name, Status: status, Message: msg})
+		if status == "error" {
+			allOk = false
+		}
+		fmt.Printf("  [%s] %s: %s\n", strings.ToUpper(status), name, msg)
+	}
+
+	fmt.Println("\n[WyvDev] 🔍 Startup Self-Check başlıyor...")
+
+	// 1. Kendi statik dosyalarını doğrula
+	requiredFiles := []string{"index.html", "app.js", "style.css", "loop.html", "search.html", "paths.html", "settings.html"}
+	missingFiles := []string{}
+	for _, f := range requiredFiles {
+		if _, err := os.Stat(filepath.Join(baseDir, f)); err != nil {
+			missingFiles = append(missingFiles, f)
+		}
+	}
+	if len(missingFiles) == 0 {
+		addCheck("Statik Dosyalar", "ok", "Tüm HTML/JS/CSS dosyaları mevcut")
+	} else {
+		addCheck("Statik Dosyalar", "warn", "Eksik dosyalar: "+strings.Join(missingFiles, ", "))
+	}
+
+	// 2. state.json doğrula ve onar
+	s, err := loadState()
+	if err != nil {
+		_ = saveState(&StateBundle{TrackedRepos: []TrackedRepo{}})
+		addCheck("State (Durum Verisi)", "warn", "state.json bozuktu, sıfırlandı ve yeniden oluşturuldu")
+		s = &StateBundle{}
+	} else {
+		addCheck("State (Durum Verisi)", "ok", fmt.Sprintf("state.json geçerli — %d MCP, %d Skill, %d IDE yolu kayıtlı", len(s.McpServers), len(s.RecommendedRepos), len(s.IdePaths)))
+	}
+
+	// 3. repo/ klasörü disk kullanımı
+	repoDir := filepath.Join(baseDir, "repo")
+	diskUsed := "0 MB"
+	if _, err := os.Stat(repoDir); err == nil {
+		var totalSize int64
+		_ = filepath.Walk(repoDir, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				totalSize += info.Size()
+			}
+			return nil
+		})
+		mb := totalSize / 1024 / 1024
+		diskUsed = fmt.Sprintf("%d MB", mb)
+		addCheck("Disk (repo/ Klasörü)", "ok", fmt.Sprintf("repo/ klasörü mevcut — %d MB kullanımda", mb))
+	} else {
+		_ = os.MkdirAll(repoDir, 0755)
+		addCheck("Disk (repo/ Klasörü)", "ok", "repo/ klasörü oluşturuldu")
+	}
+
+	// 4. Kayıtlı repolar klonlu mu? Eksikleri arka planda clone et
+	if len(s.TrackedRepos) > 0 {
+		missingRepos := []string{}
+		for _, tr := range s.TrackedRepos {
+			repoPath := filepath.Join(baseDir, "repo", tr.Name)
+			if _, err := os.Stat(repoPath); err != nil {
+				missingRepos = append(missingRepos, tr.Name)
+			}
+		}
+		if len(missingRepos) > 0 {
+			addCheck("Kayıtlı Repolar", "warn", fmt.Sprintf("%d repo eksik, arka planda klonlanıyor: %s", len(missingRepos), strings.Join(missingRepos, ", ")))
+			go autoCloneMissingRepos(s)
+		} else {
+			addCheck("Kayıtlı Repolar", "ok", fmt.Sprintf("Tüm %d repo klonlu ve mevcut", len(s.TrackedRepos)))
+		}
+	} else {
+		addCheck("Kayıtlı Repolar", "ok", "Henüz takip edilen repo yok")
+	}
+
+	// 5. IDE yollarını doğrula ve geçersizleri temizle
+	if len(s.IdePaths) > 0 {
+		validPaths := []IdePathEntry{}
+		removed := 0
+		for _, ide := range s.IdePaths {
+			dir := filepath.Dir(ide.Path)
+			if _, err := os.Stat(dir); err == nil {
+				validPaths = append(validPaths, ide)
+			} else {
+				removed++
+			}
+		}
+		if removed > 0 {
+			s.IdePaths = validPaths
+			_ = saveState(s)
+			addCheck("IDE Yolları", "warn", fmt.Sprintf("%d geçersiz IDE yolu temizlendi, %d yol geçerli", removed, len(validPaths)))
+		} else {
+			addCheck("IDE Yolları", "ok", fmt.Sprintf("Tüm %d IDE yolu geçerli", len(s.IdePaths)))
+		}
+	} else {
+		addCheck("IDE Yolları", "ok", "IDE yolları state'den otomatik algılanacak")
+	}
+
+	// 6. Port çakışma kontrolü (zaten dinliyorsa bildir)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", defaultPort), 100*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		addCheck("Port Kontrolü", "warn", fmt.Sprintf("Port %d zaten kullanımda — mevcut instance'a bağlanılıyor", defaultPort))
+	} else {
+		addCheck("Port Kontrolü", "ok", fmt.Sprintf("Port %d müsait, sunucu başlatılıyor", defaultPort))
+	}
+
+	// 7. Kritik runtime araçları
+	runtimes := map[string]string{
+		"git":  "git --version",
+		"node": "node --version",
+		"go":   "go version",
+	}
+	missingRuntimes := []string{}
+	for tool := range runtimes {
+		cmd := exec.Command(tool, "--version")
+		if tool == "go" {
+			cmd = exec.Command("go", "version")
+		}
+		if err := cmd.Run(); err != nil {
+			missingRuntimes = append(missingRuntimes, tool)
+		}
+	}
+	if len(missingRuntimes) == 0 {
+		addCheck("Runtime Araçları", "ok", "git, node, go — tüm araçlar kurulu")
+	} else {
+		addCheck("Runtime Araçları", "warn", "Eksik araçlar: "+strings.Join(missingRuntimes, ", ")+" (Sistem & Teşhis sayfasından kurulabilir)")
+	}
+
+	startupMux.Lock()
+	startupReport = StartupReport{
+		Ready:    allOk,
+		Checks:   checks,
+		DiskUsed: diskUsed,
+		BaseDir:  baseDir,
+	}
+	startupMux.Unlock()
+
+	okCount := 0
+	warnCount := 0
+	for _, c := range checks {
+		if c.Status == "ok" {
+			okCount++
+		} else if c.Status == "warn" {
+			warnCount++
+		}
+	}
+	fmt.Printf("[WyvDev] ✅ Startup kontrolü tamamlandı: %d OK, %d uyarı\n", okCount, warnCount)
+	fmt.Println()
+}
+
 func runServer() {
 	baseDir := getBaseDir()
+
+	// Run startup checks in background before serving
+	go runStartupChecks(baseDir)
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/state", handleState)
 	mux.HandleFunc("POST /api/state", handleState)
 	mux.HandleFunc("POST /api/state/migrate", handleStateMigrate)
+	mux.HandleFunc("GET /api/startup/status", handleStartupStatus)
 	mux.HandleFunc("GET /api/ides/detect", handleIdesDetect)
 	mux.HandleFunc("POST /api/ides/backup", handleIdeBackup)
 	mux.HandleFunc("POST /api/ides/{id}/danger-delete", handleDangerDelete)
@@ -2448,6 +2629,7 @@ func runServer() {
 		fmt.Printf("❌ Sunucu baslatilamadi: %v\n", err)
 		waitForExit()
 	}
+
 }
 
 // ---------- legacy one-shot CLI mode (ai-toolkit --once) ----------

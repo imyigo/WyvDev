@@ -1,9 +1,14 @@
 @echo off
-setlocal
+title WyvDev Hub — Local Developer PaaS
+cd /d "%~dp0"
+
+:start
 echo ================================================================
-echo  WyvDev Hub — Canli Sunucu Baslatiliyor (Windows)
-echo  wyvdev.exe kendi HTTP sunucusunu acar ve tarayiciyi baslatir
+echo  WyvDev Hub — Starting... (Auto-Restart Watchdog Active)
 echo ================================================================
 echo.
-start "WyvDev Hub" "%~dp0wyvdev.exe"
-exit
+wyvdev.exe
+echo.
+echo [WyvDev] Backend durdu. 3 saniye sonra yeniden baslatiliyor...
+timeout /t 3 /nobreak >nul
+goto start
