@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WyvDev — Skill & MCP Marketplace</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="header">
+    <div class="brand">
+      <div class="brand-icon">
+        <div class="brand-inner">
+          <i data-lucide="store" class="w-5 h-5"></i>
+        </div>
+      </div>
+      <div>
+        <div class="flex items-center gap-2">
+          <h1 class="font-bold text-base text-gray-100 tracking-wide">WyvDev Hub v1.0</h1>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
+            🏪 Skill & MCP Marketplace
+          </span>
+        </div>
+        <p class="text-[11px] text-gray-400">Açık Kaynak AI Skill & MCP Sunucu Keşif Kataloğu</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <span id="backend-status-pill" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30">🔴 Backend Bağlı Değil</span>
+      <span class="master-ide-info-badge text-[11px] font-bold px-3 py-1 rounded-xl bg-amber-500/10 text-amber-300 border border-amber-500/20 flex items-center gap-1.5">
+        👑 Cursor (Loading...)
+      </span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="menu-group">
+        <p class="menu-title">Yönetim Paneli</p>
+
+        <a href="index.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="layout-grid" class="w-4 h-4 text-cyan-400"></i>
+            <span>Yerel Kütüphane</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <span id="repo-count-badge" class="text-[10px] font-bold px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300">0</span>
+          </div>
+        </a>
+
+        <a href="loop.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="rotate-cw" class="w-4 h-4 text-indigo-400"></i>
+            <span>🌀 Loop Engine</span>
+          </div>
+          <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300">v1.0</span>
+        </a>
+
+        <a href="search.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="search" class="w-4 h-4 text-purple-400"></i>
+            <span>GitHub Arama</span>
+          </div>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300">Canlı</span>
+        </a>
+
+        <a href="marketplace.html" class="nav-btn active">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="store" class="w-4 h-4 text-amber-400"></i>
+            <span>Marketplace</span>
+          </div>
+          <span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300">Yeni</span>
+        </a>
+
+        <a href="paths.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="folder-tree" class="w-4 h-4 text-emerald-400"></i>
+            <span>IDE Dosya Yolları</span>
+          </div>
+        </a>
+
+        <a href="settings.html" class="nav-btn">
+          <div class="flex items-center gap-2.5">
+            <i data-lucide="settings" class="w-4 h-4 text-amber-400"></i>
+            <span>Sistem & Teşhis</span>
+          </div>
+        </a>
+      </div>
+
+      <div class="p-3.5 rounded-xl bg-gray-900/60 border border-gray-800 text-[11px] text-gray-400 space-y-2">
+        <p class="font-semibold text-gray-200 flex items-center gap-1.5">
+          <i data-lucide="sparkles" class="w-3.5 h-3.5 text-amber-400"></i> Tek Tıkla Kur & Aktar
+        </p>
+        <p class="leading-relaxed text-gray-400">
+          Marketplace'teki herhangi bir paketi tek tıkla indirip <code class="text-amber-300">repo/</code> klasörüne ekleyebilir ve tüm IDE'lerinize anında aktarabilirsiniz.
+        </p>
+      </div>
+    </aside>
+
+    <!-- Main View -->
+    <main class="main-content">
+      <div class="space-y-6">
+
+        <!-- Banner -->
+        <div class="bg-gradient-to-r from-amber-500/10 via-purple-500/10 to-indigo-500/10 p-5 rounded-2xl border border-amber-500/20 shadow-xl space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-4">
+            <div class="flex items-center gap-3.5">
+              <div class="w-12 h-12 rounded-2xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-300 shadow-inner">
+                <i data-lucide="store" class="w-6 h-6"></i>
+              </div>
+              <div>
+                <h2 class="font-bold text-base text-gray-100 flex items-center gap-2">
+                  Açık Kaynak AI Skill & MCP Sunucu Kataloğu
+                </h2>
+                <p class="text-xs text-gray-400 mt-0.5">Topluluk tarafından geliştirilen en popüler Skill paketleri ve MCP protokol sunucuları.</p>
+              </div>
+            </div>
+
+            <!-- Filter Controls -->
+            <div class="flex items-center gap-2.5 flex-wrap">
+              <div class="relative">
+                <i data-lucide="search" class="w-3.5 h-3.5 text-gray-400 absolute left-3 top-2.5"></i>
+                <input id="marketplace-search-input" oninput="filterMarketplaceItems()" type="text" placeholder="Paket veya repo ara..." class="bg-gray-950/80 pl-8 pr-3 py-1.5 rounded-xl border border-gray-800 text-xs text-gray-200 focus:outline-none focus:border-amber-500/50 w-48 transition-all">
+              </div>
+
+              <select id="marketplace-type-filter" onchange="filterMarketplaceItems()" class="bg-gray-950/80 px-3 py-1.5 rounded-xl border border-gray-800 text-xs text-gray-200 focus:outline-none cursor-pointer">
+                <option value="all">Tüm Türler</option>
+                <option value="skill">📄 Skill & Prompt</option>
+                <option value="mcp">🔌 MCP Server</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- Catalog Grid -->
+        <div id="marketplace-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div class="col-span-full py-12 text-center text-gray-400 flex flex-col items-center gap-3">
+            <i data-lucide="loader-2" class="w-8 h-8 animate-spin text-amber-400"></i>
+            <p class="text-xs font-semibold">Marketplace kataloğu yükleniyor...</p>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

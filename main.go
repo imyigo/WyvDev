@@ -26,10 +26,12 @@ type TaskEntry struct {
 	ID        string    `json:"id"`
 	Type      string    `json:"type"`    // "clone", "pull", "install", "delete", "run"
 	Name      string    `json:"name"`    // repo or folder name
-	Status    string    `json:"status"`  // "running", "completed", "error"
+	Status    string    `json:"status"`  // "running", "completed", "error", "cancelled"
 	Message   string    `json:"message"` // detail or output snippet
 	StartedAt time.Time `json:"startedAt"`
 	EndedAt   time.Time `json:"endedAt,omitempty"`
+
+	cancel context.CancelFunc // not serialized; lets /stop interrupt the in-flight command
 }
 
 var (
@@ -70,6 +72,14 @@ func finishTask(task *TaskEntry, status, msg string) {
 	task.Status = status
 	task.Message = msg
 	task.EndedAt = time.Now()
+	task.cancel = nil
+}
+
+// attachCancel lets a running task be interrupted later via POST /api/tasks/{id}/stop.
+func (t *TaskEntry) attachCancel(cancel context.CancelFunc) {
+	tasksMutex.Lock()
+	t.cancel = cancel
+	tasksMutex.Unlock()
 }
 
 func handleTasks(w http.ResponseWriter, r *http.Request) {
@@ -85,11 +95,81 @@ func handleTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, list)
 }
 
+// handleTaskStop cancels a running task's underlying command (git clone, install,
+// repo start, check-all) without removing it from the list — it settles into
+// "cancelled" once the interrupted command actually returns.
+func handleTaskStop(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	tasksMutex.Lock()
+	task, ok := tasksMap[id]
+	var cancel context.CancelFunc
+	var status, name, typ string
+	if ok {
+		cancel = task.cancel
+		status = task.Status
+		name = task.Name
+		typ = task.Type
+	}
+	tasksMutex.Unlock()
+
+	if !ok {
+		writeErr(w, 404, "gorev bulunamadi")
+		return
+	}
+	if status != "running" {
+		writeJSON(w, 200, map[string]interface{}{"ok": true, "message": "Görev zaten sona ermiş."})
+		return
+	}
+	if cancel == nil {
+		writeErr(w, 400, "bu gorev turu durdurulamiyor")
+		return
+	}
+
+	cancel()
+	logActivity("task-stop", fmt.Sprintf("%s (%s) durduruldu", name, typ))
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":      true,
+		"message": fmt.Sprintf("🛑 '%s' görevi durduruluyor...", name),
+	})
+}
+
+// handleTaskDelete removes a task from the visible list (running tasks are
+// stopped first, same as handleTaskStop, then dropped from history).
+func handleTaskDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	tasksMutex.Lock()
+	task, ok := tasksMap[id]
+	var cancel context.CancelFunc
+	if ok {
+		cancel = task.cancel
+		delete(tasksMap, id)
+		for i, oid := range taskOrder {
+			if oid == id {
+				taskOrder = append(taskOrder[:i], taskOrder[i+1:]...)
+				break
+			}
+		}
+	}
+	tasksMutex.Unlock()
+
+	if !ok {
+		writeErr(w, 404, "gorev bulunamadi")
+		return
+	}
+	if cancel != nil {
+		cancel()
+	}
+	writeJSON(w, 200, map[string]interface{}{"ok": true})
+}
+
 type McpServerConfig struct {
 	Type    string            `json:"type,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
+	Cwd     string            `json:"cwd,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
 }
@@ -99,11 +179,11 @@ type McpConfigFile struct {
 }
 
 type DetectedIde struct {
-	ID        string
-	Name      string
-	Path      string // MCP config file path
-	SkillsDir string // global skills folder for this agent, e.g. ~/.claude/skills — empty if unknown
-	Detected  bool
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	SkillsDir string `json:"skillsDir,omitempty"`
+	Detected  bool   `json:"detected"`
 }
 
 type MCPEntry struct {
@@ -122,6 +202,7 @@ type MCPEntry struct {
 	Env       map[string]string `json:"env,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Repo      string            `json:"repo,omitempty"`
+	Cwd       string            `json:"cwd,omitempty"`
 }
 
 type SkillEntry struct {
@@ -169,6 +250,10 @@ type ScanEntry struct {
 	RunningPid     int      `json:"runningPid,omitempty"`
 	RepoType       string   `json:"repoType"`
 	RepoTypeLabel  string   `json:"repoTypeLabel"`
+	RunMode        string   `json:"runMode,omitempty"`      // "local" or "docker" — the one primary way to run this repo
+	MissingTool    string   `json:"missingTool,omitempty"`  // system tool RunMode needs but isn't installed (e.g. "docker")
+	LocalCommand   string   `json:"localCommand,omitempty"` // absolute-path command for a real (not npx-guessed) MCP stdio config
+	LocalArgs      []string `json:"localArgs,omitempty"`
 }
 
 type RunningApp struct {
@@ -197,6 +282,7 @@ type LoopEngineConfig struct {
 }
 
 type StateBundle struct {
+	MasterIDE        string           `json:"masterIde,omitempty"`
 	McpServers       []MCPEntry       `json:"mcpServers"`
 	RecommendedRepos []SkillEntry     `json:"recommendedRepos"`
 	IdePaths         []IdePathEntry   `json:"idePaths"`
@@ -244,32 +330,69 @@ func getBaseDir() string {
 	return "."
 }
 
+// getAppSupportDir returns the per-OS root that Electron-based apps (VS Code,
+// Cursor, Windsurf, Claude Desktop, JetBrains) use for user config: %APPDATA%
+// on Windows, ~/Library/Application Support on macOS, ~/.config on Linux.
+// detectIdes() used to assume the Windows shape unconditionally, so on
+// macOS/Linux it pointed at a folder those apps never read from or write to
+// — MCP sync looked like it worked (200 OK, "N sunucu yazıldı" logged) but
+// silently wrote into a stray folder next to nothing.
+func getAppSupportDir() string {
+	if testHome := os.Getenv("AI_TOOLKIT_TEST_HOME"); testHome != "" {
+		switch runtime.GOOS {
+		case "windows":
+			return filepath.Join(testHome, "AppData", "Roaming")
+		case "darwin":
+			return filepath.Join(testHome, "Library", "Application Support")
+		default:
+			return filepath.Join(testHome, ".config")
+		}
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return getAppDataDir()
+	case "darwin":
+		return filepath.Join(getHomeDir(), "Library", "Application Support")
+	default:
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			return xdg
+		}
+		return filepath.Join(getHomeDir(), ".config")
+	}
+}
+
 func detectIdes() []DetectedIde {
 	home := getHomeDir()
-	appData := getAppDataDir()
+	appData := getAppSupportDir()
 	baseDir := getBaseDir()
 
 	candidates := []DetectedIde{
-		{ID: "antigravity-app", Name: "Antigravity IDE & App", Path: filepath.Join(home, ".gemini", "antigravity", "mcp_config.json")},
-		{ID: "antigravity-global", Name: "Antigravity Global Config", Path: filepath.Join(home, ".gemini", "config", "mcp_config.json")},
-		{ID: "claude-desktop", Name: "Claude Desktop App", Path: filepath.Join(appData, "Claude", "claude_desktop_config.json")},
-		{ID: "cursor", Name: "Cursor IDE", Path: filepath.Join(home, ".cursor", "mcp.json")},
-		{ID: "cursor-cline", Name: "Cursor (Cline Extension)", Path: filepath.Join(appData, "Cursor", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json")},
+		{ID: "antigravity-app", Name: "Antigravity IDE & App", Path: filepath.Join(home, ".gemini", "antigravity", "mcp_config.json"), SkillsDir: filepath.Join(home, ".gemini", "antigravity", "builtin", "skills")},
+		{ID: "antigravity-global", Name: "Antigravity Global Config", Path: filepath.Join(home, ".gemini", "config", "mcp_config.json"), SkillsDir: filepath.Join(home, ".gemini", "config", "skills")},
+		{ID: "claude-desktop", Name: "Claude Desktop App", Path: filepath.Join(appData, "Claude", "claude_desktop_config.json"), SkillsDir: filepath.Join(appData, "Claude", "skills")},
+		{ID: "cursor", Name: "Cursor IDE", Path: filepath.Join(home, ".cursor", "mcp.json"), SkillsDir: filepath.Join(home, ".cursor", "skills")},
+		{ID: "cursor-cline", Name: "Cursor (Cline Extension)", Path: filepath.Join(appData, "Cursor", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json"), SkillsDir: filepath.Join(appData, "Cursor", "User", "globalStorage", "saoudrizwan.claude-dev", "skills")},
 		{ID: "claude-code", Name: "Claude Code CLI", Path: filepath.Join(home, ".claude.json"), SkillsDir: filepath.Join(home, ".claude", "skills")},
-		{ID: "vscode-cline", Name: "VS Code (Cline Extension)", Path: filepath.Join(appData, "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json")},
-		{ID: "vscode-roo", Name: "VS Code (Roo Code Extension)", Path: filepath.Join(appData, "Code", "User", "globalStorage", "rooveterinaryinc.roo-cline", "settings", "cline_mcp_settings.json")},
-		{ID: "vscode-workspace", Name: "VS Code Workspace", Path: filepath.Join(baseDir, ".vscode", "mcp.json")},
-		{ID: "windsurf", Name: "Windsurf IDE", Path: filepath.Join(appData, "Windsurf", "User", "globalStorage", "mcp_config.json")},
-		{ID: "zed", Name: "Zed Editor", Path: filepath.Join(home, ".config", "zed", "settings.json")},
-		{ID: "continue", Name: "Continue.dev", Path: filepath.Join(home, ".continue", "config.json")},
-		{ID: "jetbrains", Name: "JetBrains IDEs", Path: filepath.Join(appData, "JetBrains", "mcp.json")},
+		{ID: "vscode-cline", Name: "VS Code (Cline Extension)", Path: filepath.Join(appData, "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "settings", "cline_mcp_settings.json"), SkillsDir: filepath.Join(appData, "Code", "User", "globalStorage", "saoudrizwan.claude-dev", "skills")},
+		{ID: "vscode-roo", Name: "VS Code (Roo Code Extension)", Path: filepath.Join(appData, "Code", "User", "globalStorage", "rooveterinaryinc.roo-cline", "settings", "cline_mcp_settings.json"), SkillsDir: filepath.Join(appData, "Code", "User", "globalStorage", "rooveterinaryinc.roo-cline", "skills")},
+		{ID: "vscode-workspace", Name: "VS Code Workspace", Path: filepath.Join(baseDir, ".vscode", "mcp.json"), SkillsDir: filepath.Join(baseDir, ".vscode", "skills")},
+		{ID: "windsurf", Name: "Windsurf IDE", Path: filepath.Join(appData, "Windsurf", "User", "globalStorage", "mcp_config.json"), SkillsDir: filepath.Join(appData, "Windsurf", "User", "globalStorage", "skills")},
+		{ID: "zed", Name: "Zed Editor", Path: filepath.Join(home, ".config", "zed", "settings.json"), SkillsDir: filepath.Join(home, ".config", "zed", "skills")},
+		{ID: "continue", Name: "Continue.dev", Path: filepath.Join(home, ".continue", "config.json"), SkillsDir: filepath.Join(home, ".continue", "skills")},
+		{ID: "jetbrains", Name: "JetBrains IDEs", Path: filepath.Join(appData, "JetBrains", "mcp.json"), SkillsDir: filepath.Join(appData, "JetBrains", "skills")},
+		{ID: "universal-agents", Name: "Universal Agent Skills", Path: filepath.Join(home, ".agents", "mcp_config.json"), SkillsDir: filepath.Join(home, ".agents", "skills")},
 	}
 
 	for i := range candidates {
 		dir := filepath.Dir(candidates[i].Path)
+		skillsParent := filepath.Dir(candidates[i].SkillsDir)
 		if _, err := os.Stat(dir); err == nil {
 			candidates[i].Detected = true
 		} else if _, err := os.Stat(candidates[i].Path); err == nil {
+			candidates[i].Detected = true
+		} else if _, err := os.Stat(skillsParent); err == nil {
+			candidates[i].Detected = true
+		} else if _, err := os.Stat(candidates[i].SkillsDir); err == nil {
 			candidates[i].Detected = true
 		}
 	}
@@ -311,6 +434,7 @@ func buildMcpConfigFile(entries []MCPEntry) *McpConfigFile {
 		} else {
 			sc.Command = e.Command
 			sc.Args = e.Args
+			sc.Cwd = e.Cwd
 			if len(e.Env) > 0 {
 				sc.Env = e.Env
 			}
@@ -320,7 +444,8 @@ func buildMcpConfigFile(entries []MCPEntry) *McpConfigFile {
 	return cfg
 }
 
-func syncToIde(targetPath string, template *McpConfigFile) (int, error) {
+func syncToIde(ide DetectedIde, template *McpConfigFile) (int, error) {
+	targetPath := ide.Path
 	dir := filepath.Dir(targetPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return 0, fmt.Errorf("klasor olusturulamadi: %v", err)
@@ -331,24 +456,84 @@ func syncToIde(targetPath string, template *McpConfigFile) (int, error) {
 		_ = copyFile(targetPath, backupPath)
 	}
 
-	var existing McpConfigFile
-	existing.McpServers = make(map[string]McpServerConfig)
-
+	var root map[string]interface{}
 	if data, err := os.ReadFile(targetPath); err == nil {
-		_ = json.Unmarshal(data, &existing)
+		_ = json.Unmarshal(data, &root)
+	}
+	if root == nil {
+		root = make(map[string]interface{})
 	}
 
-	if existing.McpServers == nil {
-		existing.McpServers = make(map[string]McpServerConfig)
+	var mcpMap map[string]interface{}
+	if existingMcp, ok := root["mcpServers"].(map[string]interface{}); ok && existingMcp != nil {
+		mcpMap = existingMcp
+	} else {
+		mcpMap = make(map[string]interface{})
 	}
 
 	addedCount := 0
 	for name, server := range template.McpServers {
-		existing.McpServers[name] = server
+		mcpMap[name] = server
 		addedCount++
 	}
+	root["mcpServers"] = mcpMap
 
-	updatedData, err := json.MarshalIndent(existing, "", "  ")
+	if ide.ID == "zed" || strings.Contains(strings.ToLower(targetPath), "zed") {
+		var zedContext map[string]interface{}
+		if existingZed, ok := root["context_servers"].(map[string]interface{}); ok && existingZed != nil {
+			zedContext = existingZed
+		} else {
+			zedContext = make(map[string]interface{})
+		}
+		for name, server := range template.McpServers {
+			if server.Type == "http" {
+				zedContext[name] = map[string]interface{}{
+					"url": server.URL,
+				}
+			} else {
+				zedContext[name] = map[string]interface{}{
+					"command": map[string]interface{}{
+						"path": server.Command,
+						"args": server.Args,
+					},
+					"env": server.Env,
+				}
+			}
+		}
+		root["context_servers"] = zedContext
+	}
+
+	if ide.ID == "continue" || strings.Contains(strings.ToLower(targetPath), "continue") {
+		var expMap map[string]interface{}
+		if existingExp, ok := root["experimental"].(map[string]interface{}); ok && existingExp != nil {
+			expMap = existingExp
+		} else {
+			expMap = make(map[string]interface{})
+		}
+		var contServers []map[string]interface{}
+		for name, server := range template.McpServers {
+			if server.Type == "http" {
+				contServers = append(contServers, map[string]interface{}{
+					"name": name,
+					"url":  server.URL,
+				})
+			} else {
+				contServers = append(contServers, map[string]interface{}{
+					"name": name,
+					"transport": map[string]interface{}{
+						"type":    "stdio",
+						"command": server.Command,
+						"args":    server.Args,
+						"env":     server.Env,
+					},
+				})
+			}
+		}
+		expMap["modelContextProtocolServers"] = contServers
+		root["experimental"] = expMap
+	}
+
+	updatedData, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("JSON olusturma hatasi: %v", err)
 	}
@@ -360,6 +545,90 @@ func syncToIde(targetPath string, template *McpConfigFile) (int, error) {
 	return addedCount, nil
 }
 
+func containsString(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val {
+			return true
+		}
+	}
+	return false
+}
+
+func removeMcpIdsFromIde(ide DetectedIde, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	targetPath := ide.Path
+	data, err := os.ReadFile(targetPath)
+	if err != nil {
+		return
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil || root == nil {
+		return
+	}
+
+	changed := false
+	if mcpMap, ok := root["mcpServers"].(map[string]interface{}); ok && mcpMap != nil {
+		for _, id := range ids {
+			if _, ok := mcpMap[id]; ok {
+				delete(mcpMap, id)
+				changed = true
+			}
+		}
+		root["mcpServers"] = mcpMap
+	}
+
+	if zedContext, ok := root["context_servers"].(map[string]interface{}); ok && zedContext != nil {
+		for _, id := range ids {
+			if _, ok := zedContext[id]; ok {
+				delete(zedContext, id)
+				changed = true
+			}
+		}
+		root["context_servers"] = zedContext
+	}
+
+	if expMap, ok := root["experimental"].(map[string]interface{}); ok && expMap != nil {
+		if contServers, ok := expMap["modelContextProtocolServers"].([]interface{}); ok {
+			var newContServers []interface{}
+			for _, item := range contServers {
+				if mItem, ok := item.(map[string]interface{}); ok {
+					name, _ := mItem["name"].(string)
+					if !containsString(ids, name) {
+						newContServers = append(newContServers, mItem)
+					} else {
+						changed = true
+					}
+				}
+			}
+			expMap["modelContextProtocolServers"] = newContServers
+			root["experimental"] = expMap
+		}
+	}
+
+	if !changed {
+		return
+	}
+
+	updatedData, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(targetPath, updatedData, 0644)
+}
+
+func removeMcpIdsFromAllIdes(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	for _, ide := range detectIdes() {
+		if ide.Detected {
+			removeMcpIdsFromIde(ide, ids)
+		}
+	}
+}
+
 func syncAllIdes(entries []MCPEntry) []map[string]interface{} {
 	template := buildMcpConfigFile(entries)
 	ides := detectIdes()
@@ -369,7 +638,7 @@ func syncAllIdes(entries []MCPEntry) []map[string]interface{} {
 			results = append(results, map[string]interface{}{"id": ide.ID, "name": ide.Name, "skipped": true})
 			continue
 		}
-		count, err := syncToIde(ide.Path, template)
+		count, err := syncToIde(ide, template)
 		entry := map[string]interface{}{"id": ide.ID, "name": ide.Name, "path": ide.Path}
 		if err != nil {
 			entry["error"] = err.Error()
@@ -398,6 +667,60 @@ func copyFile(src, dst string) error {
 
 	_, err = io.Copy(out, in)
 	return err
+}
+
+func ensureValidDir(path string) error {
+	dir := path
+	var parts []string
+	for dir != "/" && dir != "." && dir != "" {
+		parts = append([]string{dir}, parts...)
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	for _, p := range parts {
+		info, err := os.Lstat(p)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if _, statErr := os.Stat(p); statErr != nil {
+				_ = os.Remove(p)
+			}
+		}
+		if err := os.MkdirAll(p, 0755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyDirRecursive copies src into dst, skipping .git (large, irrelevant for a
+// skill payload) and node_modules (regenerable, often huge).
+func copyDirRecursive(src, dst string) error {
+	if err := ensureValidDir(dst); err != nil {
+		return err
+	}
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return ensureValidDir(dst)
+		}
+		base := filepath.Base(rel)
+		if info.IsDir() && (base == ".git" || base == "node_modules") {
+			return filepath.SkipDir
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return ensureValidDir(target)
+		}
+		return copyFile(path, target)
+	})
 }
 
 // ---------- state.json persistence ----------
@@ -542,12 +865,14 @@ func autoCloneMissingRepos(s *StateBundle) []map[string]interface{} {
 		tracked[t.Repo] = true
 	}
 
-	// Anything with a "repo" (owner/name) field gets cloned into repo/<name> and
-	// tracked — whether it arrived as a skill or as an MCP server (e.g. added
-	// from the GitHub live search tab).
+	// Only clone repos the user explicitly pulled in from the GitHub live search
+	// tab (tagged category "GitHub" by downloadRepoFromGithub) or added as a
+	// custom MCP server with a repo field — never the built-in default skill
+	// catalog (DEFAULT_RECOMMENDED_REPOS), which is just a browsable list and
+	// must not be auto-installed as a side effect of unrelated state saves.
 	var repoRefs []string
 	for _, skill := range s.RecommendedRepos {
-		if skill.Repo != "" {
+		if skill.Repo != "" && skill.Category == "GitHub" {
 			repoRefs = append(repoRefs, skill.Repo)
 		}
 	}
@@ -573,10 +898,19 @@ func autoCloneMissingRepos(s *StateBundle) []map[string]interface{} {
 		}
 
 		task := addTask("clone", repoRef, fmt.Sprintf("%s deposu repo/%s klasörüne klonlanıyor...", repoRef, name))
-		cmd := exec.Command("git", "clone", "https://github.com/"+repoRef+".git", localPath)
+		cloneCtx, cloneCancel := context.WithCancel(context.Background())
+		task.attachCancel(cloneCancel)
+		cmd := enhancedCommand(cloneCtx, "git", "clone", "https://github.com/"+repoRef+".git", localPath)
 		out, err := cmd.CombinedOutput()
+		wasCancelled := cloneCtx.Err() == context.Canceled
+		cloneCancel()
 		result := map[string]interface{}{"repo": repoRef, "path": localPath}
-		if err != nil {
+		if err != nil && wasCancelled {
+			result["cancelled"] = true
+			_ = os.RemoveAll(localPath)
+			logActivity("clone-stop", repoRef)
+			finishTask(task, "cancelled", fmt.Sprintf("%s klonlama işlemi durduruldu.", repoRef))
+		} else if err != nil {
 			errStr := strings.TrimSpace(string(out))
 			result["error"] = errStr
 			logActivity("clone-error", fmt.Sprintf("%s: %s", repoRef, errStr))
@@ -603,21 +937,21 @@ func autoCloneMissingRepos(s *StateBundle) []map[string]interface{} {
 	return results
 }
 
-func gitCheck(name string) (string, error) {
+func gitCheck(ctx context.Context, name string) (string, error) {
 	dir := repoDir(name)
 	if _, err := os.Stat(dir); err != nil {
 		return "", fmt.Errorf("yerel klasor yok: %s", dir)
 	}
 
-	if out, err := exec.Command("git", "-C", dir, "fetch").CombinedOutput(); err != nil {
+	if out, err := enhancedCommand(ctx, "git", "-C", dir, "fetch").CombinedOutput(); err != nil {
 		return "error", fmt.Errorf("git fetch basarisiz: %s", strings.TrimSpace(string(out)))
 	}
 
-	localOut, err := exec.Command("git", "-C", dir, "rev-parse", "HEAD").CombinedOutput()
+	localOut, err := enhancedCommand(ctx, "git", "-C", dir, "rev-parse", "HEAD").CombinedOutput()
 	if err != nil {
 		return "error", fmt.Errorf("rev-parse HEAD: %v", err)
 	}
-	remoteOut, err := exec.Command("git", "-C", dir, "rev-parse", "@{u}").CombinedOutput()
+	remoteOut, err := enhancedCommand(ctx, "git", "-C", dir, "rev-parse", "@{u}").CombinedOutput()
 	if err != nil {
 		return "error", fmt.Errorf("upstream yok: %v", err)
 	}
@@ -628,7 +962,7 @@ func gitCheck(name string) (string, error) {
 		return "upToDate", nil
 	}
 
-	countOut, _ := exec.Command("git", "-C", dir, "rev-list", "--left-right", "--count", "HEAD...@{u}").CombinedOutput()
+	countOut, _ := enhancedCommand(ctx, "git", "-C", dir, "rev-list", "--left-right", "--count", "HEAD...@{u}").CombinedOutput()
 	fields := strings.Fields(string(countOut))
 	if len(fields) == 2 {
 		ahead, behind := fields[0], fields[1]
@@ -728,17 +1062,34 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		previous, loadErr := loadState()
+
 		// Pages that don't manage trackedRepos (index/skills/paths) push a bundle
 		// without that field — preserve whatever is already on disk instead of wiping it.
-		if len(incoming.TrackedRepos) == 0 {
-			if existing, err := loadState(); err == nil {
-				incoming.TrackedRepos = existing.TrackedRepos
-			}
+		if len(incoming.TrackedRepos) == 0 && loadErr == nil {
+			incoming.TrackedRepos = previous.TrackedRepos
 		}
 
 		if err := saveState(&incoming); err != nil {
 			writeErr(w, 500, err.Error())
 			return
+		}
+
+		// An id that was in the previous list but isn't in this one was just
+		// removed (e.g. the trash icon on an MCP card) — drop it from every
+		// real IDE config too, since syncAllIdes below only ever adds/updates.
+		if loadErr == nil {
+			stillPresent := map[string]bool{}
+			for _, m := range incoming.McpServers {
+				stillPresent[m.ID] = true
+			}
+			var removedIds []string
+			for _, m := range previous.McpServers {
+				if !stillPresent[m.ID] {
+					removedIds = append(removedIds, m.ID)
+				}
+			}
+			removeMcpIdsFromAllIdes(removedIds)
 		}
 
 		var syncResults []map[string]interface{}
@@ -848,6 +1199,7 @@ func handleIdesDetect(w http.ResponseWriter, r *http.Request) {
 
 	if resetAll {
 		s.DeletedIdeIDs = nil
+		s.IdePaths = nil
 	}
 
 	deletedSet := map[string]bool{}
@@ -885,6 +1237,14 @@ func handleIdesDetect(w http.ResponseWriter, r *http.Request) {
 
 	s.IdePaths = merged
 	_ = saveState(s)
+
+	// A newly-installed IDE picked up by this scan shouldn't have to wait for
+	// the next unrelated MCP edit to receive the existing config — push it
+	// immediately so "detect" always leaves every IDE up to date too.
+	if len(s.McpServers) > 0 {
+		syncAllIdes(s.McpServers)
+	}
+
 	writeJSON(w, 200, merged)
 }
 
@@ -974,9 +1334,544 @@ func handleDangerDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---------- Master IDE Mirror Sync Logic ----------
+
+func readMcpEntriesFromIdeConfig(ide *DetectedIde) ([]MCPEntry, error) {
+	if ide == nil || ide.Path == "" {
+		return nil, fmt.Errorf("master ide yolu geçersiz")
+	}
+	data, err := os.ReadFile(ide.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+
+	var mcpMap map[string]interface{}
+	if m, ok := root["mcpServers"].(map[string]interface{}); ok && m != nil {
+		mcpMap = m
+	} else if m, ok := root["context_servers"].(map[string]interface{}); ok && m != nil {
+		mcpMap = m
+	}
+
+	entries := []MCPEntry{}
+	for name, v := range mcpMap {
+		srv, ok := v.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		entry := MCPEntry{
+			ID:   name,
+			Name: name,
+		}
+		if t, ok := srv["type"].(string); ok && t == "http" {
+			entry.Type = "http"
+			if urlStr, ok := srv["url"].(string); ok {
+				entry.URL = urlStr
+			}
+		} else if urlStr, ok := srv["url"].(string); ok && urlStr != "" {
+			entry.Type = "http"
+			entry.URL = urlStr
+		} else {
+			entry.Type = "command"
+			if cmd, ok := srv["command"].(string); ok {
+				entry.Command = cmd
+			} else if cmdObj, ok := srv["command"].(map[string]interface{}); ok {
+				if p, ok := cmdObj["path"].(string); ok {
+					entry.Command = p
+				}
+				if argsSlice, ok := cmdObj["args"].([]interface{}); ok {
+					for _, a := range argsSlice {
+						if str, ok := a.(string); ok {
+							entry.Args = append(entry.Args, str)
+						}
+					}
+				}
+			}
+			if argsSlice, ok := srv["args"].([]interface{}); ok {
+				for _, a := range argsSlice {
+					if str, ok := a.(string); ok {
+						entry.Args = append(entry.Args, str)
+					}
+				}
+			}
+			if envMap, ok := srv["env"].(map[string]interface{}); ok {
+				entry.Env = make(map[string]string)
+				for ek, ev := range envMap {
+					if str, ok := ev.(string); ok {
+						entry.Env[ek] = str
+					}
+				}
+			}
+			if cwd, ok := srv["cwd"].(string); ok {
+				entry.Cwd = cwd
+			}
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+func syncSkillsFromMasterIde(masterIde *DetectedIde) (int, error) {
+	if masterIde == nil || masterIde.SkillsDir == "" {
+		return 0, nil
+	}
+	if _, err := os.Stat(masterIde.SkillsDir); err != nil {
+		return 0, nil
+	}
+	skillFolders := findAllSkillFolders(masterIde.SkillsDir)
+	if len(skillFolders) == 0 {
+		return 0, nil
+	}
+
+	totalCopied := 0
+	for _, ide := range detectIdes() {
+		if !ide.Detected || ide.SkillsDir == "" || ide.ID == masterIde.ID {
+			continue
+		}
+		if err := ensureValidDir(ide.SkillsDir); err != nil {
+			continue
+		}
+		for _, folder := range skillFolders {
+			sName := filepath.Base(folder)
+			destDir := filepath.Join(ide.SkillsDir, sName)
+			if err := copyDirRecursive(folder, destDir); err == nil {
+				totalCopied++
+			}
+		}
+	}
+	return totalCopied, nil
+}
+
+func executeMasterIdeMirrorSync(masterID string) (map[string]interface{}, error) {
+	ides := detectIdes()
+	var masterIde *DetectedIde
+	for _, ide := range ides {
+		if ide.ID == masterID {
+			t := ide
+			masterIde = &t
+			break
+		}
+	}
+	if masterIde == nil {
+		return nil, fmt.Errorf("master IDE bulunamadı: %s", masterID)
+	}
+
+	entries, err := readMcpEntriesFromIdeConfig(masterIde)
+	if err != nil {
+		logActivity("master-ide-read-warning", fmt.Sprintf("%s: %v", masterIde.Name, err))
+	}
+
+	s, _ := loadState()
+	if s == nil {
+		s = &StateBundle{}
+	}
+	s.MasterIDE = masterID
+	if len(entries) > 0 {
+		s.McpServers = entries
+	}
+	_ = saveState(s)
+
+	syncResults := syncAllIdes(s.McpServers)
+	skillsCopied, _ := syncSkillsFromMasterIde(masterIde)
+
+	logActivity("master-ide-sync", fmt.Sprintf("Master (%s) -> %d MCP, %d Skill tüm IDE'lere aktarıldı", masterIde.Name, len(s.McpServers), skillsCopied))
+
+	return map[string]interface{}{
+		"ok":           true,
+		"masterName":   masterIde.Name,
+		"masterId":     masterID,
+		"mcpCount":     len(s.McpServers),
+		"skillsCopied": skillsCopied,
+		"syncResults":  syncResults,
+		"message":      fmt.Sprintf("✨ '%s' (Ana IDE) üzerindeki %d MCP ve %d Skill diğer tüm IDE'lere doğrudan aktarıldı!", masterIde.Name, len(s.McpServers), skillsCopied),
+	}, nil
+}
+
+func handleIdesGetMaster(w http.ResponseWriter, r *http.Request) {
+	s, err := loadState()
+	if err != nil {
+		s = &StateBundle{}
+	}
+	masterID := s.MasterIDE
+	if masterID == "" {
+		masterID = "cursor"
+	}
+
+	ides := detectIdes()
+	var masterIde *DetectedIde
+	for _, ide := range ides {
+		if ide.ID == masterID {
+			t := ide
+			masterIde = &t
+			break
+		}
+	}
+
+	var mcpCount int
+	var skillsCount int
+	if masterIde != nil {
+		entries, _ := readMcpEntriesFromIdeConfig(masterIde)
+		mcpCount = len(entries)
+		if masterIde.SkillsDir != "" {
+			skillsCount = len(findAllSkillFolders(masterIde.SkillsDir))
+		}
+	}
+
+	writeJSON(w, 200, map[string]interface{}{
+		"masterIde":   masterID,
+		"master":      masterIde,
+		"mcpCount":    mcpCount,
+		"skillsCount": skillsCount,
+		"allIdes":     ides,
+	})
+}
+
+func handleIdesSetMaster(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MasterIDE string `json:"masterIde"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "geçersiz JSON")
+		return
+	}
+	if body.MasterIDE == "" {
+		writeErr(w, 400, "masterIde alanı gerekli")
+		return
+	}
+
+	s, err := loadState()
+	if err != nil {
+		s = &StateBundle{}
+	}
+	s.MasterIDE = body.MasterIDE
+	if err := saveState(s); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
+	logActivity("master-ide-set", "Ana IDE Değiştirildi: "+body.MasterIDE)
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "masterIde": s.MasterIDE})
+}
+
+func handleIdesSyncMaster(w http.ResponseWriter, r *http.Request) {
+	s, err := loadState()
+	if err != nil {
+		s = &StateBundle{}
+	}
+	masterID := s.MasterIDE
+	if masterID == "" {
+		masterID = "cursor"
+	}
+
+	res, err := executeMasterIdeMirrorSync(masterID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
+	writeJSON(w, 200, res)
+}
+
+// ---------- IDE Visual Diff & Marketplace Handlers ----------
+
+func handleIdeDiff(w http.ResponseWriter, r *http.Request) {
+	s, err := loadState()
+	if err != nil {
+		s = &StateBundle{}
+	}
+	masterID := r.URL.Query().Get("master")
+	if masterID == "" {
+		masterID = s.MasterIDE
+	}
+	if masterID == "" {
+		masterID = "cursor"
+	}
+
+	targetID := r.URL.Query().Get("target")
+
+	ides := detectIdes()
+	var masterIde *DetectedIde
+	for _, ide := range ides {
+		if ide.ID == masterID {
+			t := ide
+			masterIde = &t
+			break
+		}
+	}
+	if masterIde == nil {
+		writeErr(w, 404, "Master IDE bulunamadı: "+masterID)
+		return
+	}
+
+	masterMcps, _ := readMcpEntriesFromIdeConfig(masterIde)
+	masterMcpsMap := make(map[string]MCPEntry)
+	for _, m := range masterMcps {
+		masterMcpsMap[m.ID] = m
+	}
+
+	masterSkills := []string{}
+	if masterIde.SkillsDir != "" {
+		for _, folder := range findAllSkillFolders(masterIde.SkillsDir) {
+			masterSkills = append(masterSkills, filepath.Base(folder))
+		}
+	}
+
+	diffs := []map[string]interface{}{}
+	for _, ide := range ides {
+		if !ide.Detected || ide.ID == masterIde.ID {
+			continue
+		}
+		if targetID != "" && targetID != "all" && ide.ID != targetID {
+			continue
+		}
+
+		targetMcps, _ := readMcpEntriesFromIdeConfig(&ide)
+		targetMcpsMap := make(map[string]MCPEntry)
+		for _, m := range targetMcps {
+			targetMcpsMap[m.ID] = m
+		}
+
+		addedMcp := []string{}
+		sameMcp := []string{}
+		for id := range masterMcpsMap {
+			if _, exists := targetMcpsMap[id]; !exists {
+				addedMcp = append(addedMcp, id)
+			} else {
+				sameMcp = append(sameMcp, id)
+			}
+		}
+
+		removedMcp := []string{}
+		for id := range targetMcpsMap {
+			if _, exists := masterMcpsMap[id]; !exists {
+				removedMcp = append(removedMcp, id)
+			}
+		}
+
+		targetSkills := []string{}
+		if ide.SkillsDir != "" {
+			for _, folder := range findAllSkillFolders(ide.SkillsDir) {
+				targetSkills = append(targetSkills, filepath.Base(folder))
+			}
+		}
+		targetSkillsMap := make(map[string]bool)
+		for _, sk := range targetSkills {
+			targetSkillsMap[sk] = true
+		}
+
+		addedSkills := []string{}
+		for _, sk := range masterSkills {
+			if !targetSkillsMap[sk] {
+				addedSkills = append(addedSkills, sk)
+			}
+		}
+
+		diffs = append(diffs, map[string]interface{}{
+			"targetId":       ide.ID,
+			"targetName":     ide.Name,
+			"targetPath":     ide.Path,
+			"addedMcp":       addedMcp,
+			"removedMcp":     removedMcp,
+			"sameMcp":        sameMcp,
+			"addedSkills":    addedSkills,
+			"masterMcpCount": len(masterMcps),
+			"targetMcpCount": len(targetMcps),
+		})
+	}
+
+	writeJSON(w, 200, map[string]interface{}{
+		"masterId":   masterIde.ID,
+		"masterName": masterIde.Name,
+		"diffs":      diffs,
+	})
+}
+
+type MarketplaceItem struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Category string `json:"category"`
+	Repo     string `json:"repo"`
+	Desc     string `json:"desc"`
+	Icon     string `json:"icon"`
+	Stars    string `json:"stars"`
+	Badge    string `json:"badge"`
+}
+
+func getMarketplaceCatalogItems() []MarketplaceItem {
+	return []MarketplaceItem{
+		{
+			ID:       "vintlin-skill-flow",
+			Name:     "SkillFlow Master Pack",
+			Type:     "skill",
+			Category: "📄 Prompt & Agent Skills",
+			Repo:     "VintLin/skill-flow",
+			Desc:     "Install, manage, and share skills across Claude Code, Cursor, Copilot, and Windsurf.",
+			Icon:     "sparkles",
+			Stars:    "4.8k",
+			Badge:    "🔥 Popüler",
+		},
+		{
+			ID:       "realzst-harnesskit",
+			Name:     "HarnessKit Agent Rules & Memory",
+			Type:     "skill",
+			Category: "🧠 Agent Rules & Memory",
+			Repo:     "RealZST/HarnessKit",
+			Desc:     "Manage skills, MCP servers, plugins, hooks, CLIs, configs, memory & rules across AI coding agents.",
+			Icon:     "brain",
+			Stars:    "3.9k",
+			Badge:    "⭐ Tavsiye",
+		},
+		{
+			ID:       "mode-io-skill-manager",
+			Name:     "SkillManager Cross-IDE Pack",
+			Type:     "skill",
+			Category: "📄 Prompt & Agent Skills",
+			Repo:     "mode-io/skill-manager",
+			Desc:     "Manage skills across Codex CLI, Claude Code, Cursor, OpenCode, and OpenClaw.",
+			Icon:     "layers",
+			Stars:    "2.9k",
+			Badge:    "⚡ Hızlı",
+		},
+		{
+			ID:       "wanghuan9-skilldock",
+			Name:     "SkillDock Diff & Sync Pack",
+			Type:     "skill",
+			Category: "📄 Prompt & Agent Skills",
+			Repo:     "wanghuan9/skilldock",
+			Desc:     "Real-directory scanning and Git-aware Diff previews for AI coding tools.",
+			Icon:     "git-compare",
+			Stars:    "2.1k",
+			Badge:    "📈 Trend",
+		},
+		{
+			ID:       "modelcontextprotocol-servers",
+			Name:     "MCP Official Reference Servers",
+			Type:     "mcp",
+			Category: "🔌 Protocol & Integration",
+			Repo:     "modelcontextprotocol/servers",
+			Desc:     "Official reference MCP servers: SQLite, Filesystem, GitHub, Git, Memory, Everything.",
+			Icon:     "server",
+			Stars:    "18.4k",
+			Badge:    "Resmî MCP",
+		},
+		{
+			ID:       "supabase-mcp",
+			Name:     "Supabase Database MCP",
+			Type:     "mcp",
+			Category: "⚡ Database & Backend",
+			Repo:     "supabase/mcp-server",
+			Desc:     "Inspect database schemas, execute queries, and manage migrations via MCP protocol.",
+			Icon:     "database",
+			Stars:    "5.6k",
+			Badge:    "Veritabanı",
+		},
+		{
+			ID:       "puppeteer-mcp",
+			Name:     "Puppeteer Web Automation MCP",
+			Type:     "mcp",
+			Category: "🌐 Web Automation",
+			Repo:     "modelcontextprotocol/servers",
+			Desc:     "Automate web browsing, screenshot capture, and web page DOM inspection.",
+			Icon:     "globe",
+			Stars:    "8.1k",
+			Badge:    "Otomasyon",
+		},
+	}
+}
+
+func handleMarketplaceCatalog(w http.ResponseWriter, r *http.Request) {
+	items := getMarketplaceCatalogItems()
+	writeJSON(w, 200, items)
+}
+
+func handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Repo string `json:"repo"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, 400, "geçersiz JSON")
+		return
+	}
+	if body.Repo == "" {
+		writeErr(w, 400, "repo alanı gerekli")
+		return
+	}
+
+	repoName := body.Name
+	if repoName == "" {
+		parts := strings.Split(body.Repo, "/")
+		repoName = parts[len(parts)-1]
+	}
+
+	task := addTask("clone", repoName, fmt.Sprintf("Marketplace paketi indiriliyor: %s", body.Repo))
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer cancel()
+		task.attachCancel(cancel)
+
+		targetDir := repoDir(repoName)
+		if _, err := os.Stat(targetDir); err == nil {
+			_ = enhancedCommand(ctx, "git", "-C", targetDir, "pull").Run()
+		} else {
+			cmd := enhancedCommand(ctx, "git", "clone", "https://github.com/"+body.Repo+".git", targetDir)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				finishTask(task, "error", fmt.Sprintf("Klonlama hatası: %v (%s)", err, string(out)))
+				return
+			}
+		}
+
+		s, _ := loadState()
+		if s == nil {
+			s = &StateBundle{}
+		}
+
+		alreadyTracked := false
+		for _, t := range s.TrackedRepos {
+			if t.Repo == body.Repo || t.Name == repoName {
+				alreadyTracked = true
+				break
+			}
+		}
+		if !alreadyTracked {
+			s.TrackedRepos = append(s.TrackedRepos, TrackedRepo{
+				Repo:        body.Repo,
+				Name:        repoName,
+				LocalPath:   targetDir,
+				Status:      "✅ Güncel",
+				LastChecked: time.Now().Format(time.RFC3339),
+			})
+			_ = saveState(s)
+		}
+
+		_, _, _ = enableSkillForRepo(repoName)
+		if s.MasterIDE != "" {
+			_, _ = executeMasterIdeMirrorSync(s.MasterIDE)
+		} else {
+			_, _ = executeMasterIdeMirrorSync("cursor")
+		}
+
+		finishTask(task, "completed", fmt.Sprintf("✅ '%s' Marketplace paketi kuruldu ve tüm IDE'lere aktarıldı!", repoName))
+	}()
+
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":      true,
+		"task":    task,
+		"message": fmt.Sprintf("🚀 '%s' paketi indirilip kuruluyor...", repoName),
+	})
+}
+
+
 func handleRepoCheck(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	status, err := gitCheck(name)
+	status, err := gitCheck(r.Context(), name)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
@@ -1003,7 +1898,7 @@ func handleRepoPull(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "yerel klasor yok")
 		return
 	}
-	out, err := exec.Command("git", "-C", dir, "pull").CombinedOutput()
+	out, err := enhancedCommand(r.Context(), "git", "-C", dir, "pull").CombinedOutput()
 	if err != nil {
 		writeErr(w, 500, strings.TrimSpace(string(out)))
 		return
@@ -1018,6 +1913,11 @@ func handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stop whatever is running against this folder before the folder itself
+	// goes away — otherwise the process (and its port) is orphaned, still
+	// running against a directory that no longer exists.
+	killRunningApp(name)
+
 	dir := repoDir(name)
 	deletedOnDisk := false
 	if _, err := os.Stat(dir); err == nil {
@@ -1026,6 +1926,15 @@ func handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		deletedOnDisk = true
+	}
+
+	// Remove any copy of this repo's skill that enable-skill placed in an
+	// IDE's skills folder — a deleted repo shouldn't leave a skill behind
+	// that still claims to come from it.
+	for _, ide := range detectIdes() {
+		if ide.SkillsDir != "" {
+			_ = os.RemoveAll(filepath.Join(ide.SkillsDir, name))
+		}
 	}
 
 	s, err := loadState()
@@ -1055,11 +1964,14 @@ func handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 	s.RecommendedRepos = stillSkills
 
 	var stillMcp []MCPEntry
+	var removedMcpIds []string
 	for _, m := range s.McpServers {
 		parts := strings.Split(m.Repo, "/")
 		repoName := parts[len(parts)-1]
 		if m.ID != name && m.Name != name && m.Repo != name && repoName != name {
 			stillMcp = append(stillMcp, m)
+		} else {
+			removedMcpIds = append(removedMcpIds, m.ID)
 		}
 	}
 	s.McpServers = stillMcp
@@ -1067,6 +1979,10 @@ func handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 	pruned := reconcileState(s)
 	_ = saveState(s)
 
+	// stillMcp's own entries get (re)synced below; removedMcpIds is exactly
+	// what's no longer supposed to exist anywhere, so strip it explicitly —
+	// syncAllIdes only ever adds/updates, it never deletes a stale key.
+	removeMcpIdsFromAllIdes(removedMcpIds)
 	syncResults := syncAllIdes(s.McpServers)
 
 	logActivity("delete-repo", fmt.Sprintf("%s (disk: %v)", name, deletedOnDisk))
@@ -1140,16 +2056,15 @@ func handleRepoRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	toolPath, err := exec.LookPath(toolName)
-	if err != nil {
-		writeErr(w, 424, fmt.Sprintf("%s bulunamadi - PATH'e kurulu olmali", toolName))
+	if !commandExistsInEnv(toolName, getEnhancedEnv()) {
+		writeErr(w, 424, fmt.Sprintf("%s bulunamadi. Sistem & Teşhis sayfasından kurabilirsiniz.", toolName))
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, toolPath, args...)
+	cmd := enhancedCommand(ctx, toolName, args...)
 	cmd.Dir = dir
 	out, runErr := cmd.CombinedOutput()
 
@@ -1179,6 +2094,71 @@ func handleRepoRun(w http.ResponseWriter, r *http.Request) {
 
 // ---------- real skill install (npx skills add ...) ----------
 
+// handleRepoEnableSkill copies a locally-cloned skill repo straight into every
+// detected IDE's skills folder (currently just Claude Code CLI's ~/.claude/skills
+// — the only one of the tracked IDEs that has a filesystem skills concept),
+// instead of leaving "enable this skill" as a manual copy the user has to do.
+func handleRepoEnableSkill(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	copiedCount, results, err := enableSkillForRepo(name)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if copiedCount == 0 {
+		for _, res := range results {
+			if errStr, ok := res["error"].(string); ok {
+				writeErr(w, 500, fmt.Sprintf("%s: %s", res["ide"], errStr))
+				return
+			}
+		}
+		writeErr(w, 424, "Skill kabul eden bir IDE tespit edilmedi (şu an sadece Claude Code CLI destekleniyor).")
+		return
+	}
+
+	logActivity("skill-enable", fmt.Sprintf("%s -> %d IDE", name, copiedCount))
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":          true,
+		"copiedCount": copiedCount,
+		"results":     results,
+		"message":     fmt.Sprintf("✅ '%s' skill'i %d IDE'ye etkinleştirildi.", name, copiedCount),
+	})
+}
+
+// handleSkillsSyncAll walks repo/ and enables every skill it finds into
+// whatever IDEs are currently detected — the "sync all skills" bulk action.
+func handleSkillsSyncAll(w http.ResponseWriter, r *http.Request) {
+	rootDir := filepath.Join(getBaseDir(), "repo")
+	dirEntries, err := os.ReadDir(rootDir)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
+	results := []map[string]interface{}{}
+	skillsSynced := 0
+	for _, de := range dirEntries {
+		if !de.IsDir() {
+			continue
+		}
+		name := de.Name()
+		copiedCount, _, err := enableSkillForRepo(name)
+		if err != nil || copiedCount == 0 {
+			continue
+		}
+		skillsSynced++
+		results = append(results, map[string]interface{}{"name": name, "copiedCount": copiedCount})
+	}
+
+	logActivity("skills-sync-all", fmt.Sprintf("%d skill -> IDE'lere", skillsSynced))
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":           true,
+		"skillsSynced": skillsSynced,
+		"results":      results,
+		"message":      fmt.Sprintf("✅ %d skill IDE'lere senkronize edildi.", skillsSynced),
+	})
+}
+
 func handleSkillInstall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Repo  string `json:"repo"`
@@ -1193,8 +2173,7 @@ func handleSkillInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	npxPath, err := exec.LookPath("npx")
-	if err != nil {
+	if !commandExistsInEnv("npx", getEnhancedEnv()) {
 		writeErr(w, 424, "npx bulunamadi - kurulum icin Node.js gerekli (https://nodejs.org)")
 		return
 	}
@@ -1209,7 +2188,7 @@ func handleSkillInstall(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, npxPath, args...)
+	cmd := enhancedCommand(ctx, "npx", args...)
 	out, runErr := cmd.CombinedOutput()
 
 	result := map[string]interface{}{
@@ -1235,7 +2214,7 @@ func handleSkillInstall(w http.ResponseWriter, r *http.Request) {
 func gitRemoteRepo(dir string) string {
 	// git -C walks UP to find a .git if dir has none of its own — guard against
 	// that returning the ai-toolkit workspace's own remote for a non-git folder.
-	topOut, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").CombinedOutput()
+	topOut, err := enhancedCommand(context.Background(), "git", "-C", dir, "rev-parse", "--show-toplevel").CombinedOutput()
 	if err != nil {
 		return ""
 	}
@@ -1248,7 +2227,7 @@ func gitRemoteRepo(dir string) string {
 		return ""
 	}
 
-	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").CombinedOutput()
+	out, err := enhancedCommand(context.Background(), "git", "-C", dir, "remote", "get-url", "origin").CombinedOutput()
 	if err != nil {
 		return ""
 	}
@@ -1263,6 +2242,242 @@ func gitRemoteRepo(dir string) string {
 		return url[idx+len("github.com/"):]
 	}
 	return ""
+}
+
+// findSkillMd returns the path to this repo's SKILL.md, checking the root
+// first, then the skills/<name>/ and plugins/<name>/skills/<name>/ bundle
+// conventions — or "" if none of those shapes are present.
+func findSkillMd(dir string) string {
+	if p := filepath.Join(dir, "SKILL.md"); fileExists(p) {
+		return p
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "skills", "*", "SKILL.md")); len(matches) > 0 {
+		return matches[0]
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "plugins", "*", "skills", "*", "SKILL.md")); len(matches) > 0 {
+		return matches[0]
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md")); len(matches) > 0 {
+		return matches[0]
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "packages", "*", "skills", "*", "SKILL.md")); len(matches) > 0 {
+		return matches[0]
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "cli", "assets", "skills", "*", "SKILL.md")); len(matches) > 0 {
+		return matches[0]
+	}
+	var found string
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || found != "" {
+			return nil
+		}
+		if !info.IsDir() && strings.EqualFold(info.Name(), "SKILL.md") {
+			found = path
+			return filepath.SkipAll
+		}
+		if info.IsDir() && (info.Name() == ".git" || info.Name() == "node_modules") {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return found
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
+func findAllSkillFolders(srcDir string) []string {
+	if fileExists(filepath.Join(srcDir, "SKILL.md")) {
+		return []string{srcDir}
+	}
+	var skillDirs []string
+	seen := make(map[string]bool)
+	_ = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			base := info.Name()
+			if base == ".git" || base == "node_modules" || base == "test" || base == "fixtures" {
+				return filepath.SkipDir
+			}
+			if fileExists(filepath.Join(path, "SKILL.md")) {
+				if !strings.Contains(path, "/fixtures/") && !strings.Contains(path, "/test/") && !strings.Contains(path, "/examples/") {
+					sName := filepath.Base(path)
+					if !seen[sName] {
+						seen[sName] = true
+						skillDirs = append(skillDirs, path)
+					}
+				}
+				return filepath.SkipDir
+			}
+		}
+		return nil
+	})
+	return skillDirs
+}
+
+// enableSkillForRepo copies each individual skill directory in repo/<name> directly
+// into every detected IDE's skills folder (e.g. ~/.gemini/config/skills/<skill_name>/SKILL.md)
+func enableSkillForRepo(name string) (int, []map[string]interface{}, error) {
+	srcDir := repoDir(name)
+	skillFolders := findAllSkillFolders(srcDir)
+	if len(skillFolders) == 0 {
+		return 0, nil, fmt.Errorf("bu klasörde SKILL.md bulunamadı")
+	}
+
+	results := []map[string]interface{}{}
+	copiedCount := 0
+	for _, ide := range detectIdes() {
+		if !ide.Detected || ide.SkillsDir == "" {
+			continue
+		}
+		if err := ensureValidDir(ide.SkillsDir); err != nil {
+			results = append(results, map[string]interface{}{"ide": ide.Name, "error": err.Error()})
+			continue
+		}
+
+		subCopied := 0
+		for _, folder := range skillFolders {
+			sName := filepath.Base(folder)
+			destDir := filepath.Join(ide.SkillsDir, sName)
+			if err := copyDirRecursive(folder, destDir); err != nil {
+				results = append(results, map[string]interface{}{"ide": ide.Name, "error": fmt.Sprintf("%s: %v", sName, err)})
+			} else {
+				subCopied++
+			}
+		}
+		if subCopied > 0 {
+			copiedCount++
+			results = append(results, map[string]interface{}{"ide": ide.Name, "skillsCount": subCopied, "ok": true})
+		}
+	}
+	return copiedCount, results, nil
+}
+
+func syncSkillsToAllIdes() (int, []map[string]interface{}) {
+	rootDir := filepath.Join(getBaseDir(), "repo")
+	dirEntries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return 0, nil
+	}
+
+	results := []map[string]interface{}{}
+	skillsSynced := 0
+	for _, de := range dirEntries {
+		if !de.IsDir() {
+			continue
+		}
+		name := de.Name()
+		srcDir := repoDir(name)
+		if findSkillMd(srcDir) == "" {
+			continue
+		}
+
+		copiedCount, _, err := enableSkillForRepo(name)
+		if err == nil && copiedCount > 0 {
+			skillsSynced++
+			results = append(results, map[string]interface{}{"name": name, "copiedCount": copiedCount})
+		}
+	}
+	return skillsSynced, results
+}
+
+func pruneDeletedSkillsFromAllIdes() int {
+	rootDir := filepath.Join(getBaseDir(), "repo")
+	validSkills := make(map[string]bool)
+	if dirEntries, err := os.ReadDir(rootDir); err == nil {
+		for _, de := range dirEntries {
+			if de.IsDir() {
+				srcDir := repoDir(de.Name())
+				if findSkillMd(srcDir) != "" {
+					validSkills[de.Name()] = true
+				}
+			}
+		}
+	}
+
+	prunedTotal := 0
+	for _, ide := range detectIdes() {
+		if ide.SkillsDir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(ide.SkillsDir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				skillName := e.Name()
+				if !validSkills[skillName] {
+					target := filepath.Join(ide.SkillsDir, skillName)
+					if err := os.RemoveAll(target); err == nil {
+						prunedTotal++
+						logActivity("skill-prune", fmt.Sprintf("Skill '%s' ide'den silindi: %s", skillName, ide.Name))
+					}
+				}
+			}
+		}
+	}
+	return prunedTotal
+}
+
+var (
+	syncStateMux      sync.Mutex
+	lastSyncStateHash string
+	fullSyncCompleted bool
+)
+
+func computeSyncStateHash() string {
+	var sb strings.Builder
+	s, err := loadState()
+	if err == nil && s != nil {
+		sb.WriteString(fmt.Sprintf("mcp:%d;", len(s.McpServers)))
+		for _, m := range s.McpServers {
+			sb.WriteString(fmt.Sprintf("%s:%s;", m.ID, m.Command))
+		}
+	}
+	rootDir := filepath.Join(getBaseDir(), "repo")
+	if entries, err := os.ReadDir(rootDir); err == nil {
+		sb.WriteString(fmt.Sprintf("repo:%d;", len(entries)))
+		for _, e := range entries {
+			if e.IsDir() {
+				info, _ := e.Info()
+				if info != nil {
+					sb.WriteString(fmt.Sprintf("%s:%d;", e.Name(), info.ModTime().UnixNano()))
+				}
+			}
+		}
+	}
+	return sb.String()
+}
+
+func runBackgroundSyncController() {
+	ticker := time.NewTicker(1 * time.Second)
+	go func() {
+		for range ticker.C {
+			syncStateMux.Lock()
+			currentHash := computeSyncStateHash()
+			if currentHash == lastSyncStateHash && fullSyncCompleted {
+				syncStateMux.Unlock()
+				continue
+			}
+
+			s, err := loadState()
+			if err == nil && s != nil {
+				syncAllIdes(s.McpServers)
+			}
+
+			_, _ = syncSkillsToAllIdes()
+			_ = pruneDeletedSkillsFromAllIdes()
+
+			lastSyncStateHash = currentHash
+			fullSyncCompleted = true
+			syncStateMux.Unlock()
+		}
+	}()
 }
 
 func extractSkillDesc(skillMdPath string) string {
@@ -1284,8 +2499,11 @@ func scanRepoFolder(name string) ScanEntry {
 	dir := repoDir(name)
 	entry := ScanEntry{Name: name, Path: dir}
 
-	skillPath := filepath.Join(dir, "SKILL.md")
-	if _, err := os.Stat(skillPath); err == nil {
+	// SKILL.md at the root covers a single-skill repo; multi-skill repos
+	// (e.g. a plugin that bundles several skills) nest it under skills/<name>/
+	// or plugins/<name>/skills/<name>/ instead — findSkillMd checks those
+	// shapes too before giving up, so a bundle of skills doesn't get missed.
+	if skillPath := findSkillMd(dir); skillPath != "" {
 		entry.HasSkill = true
 		entry.SkillDesc = extractSkillDesc(skillPath)
 	}
@@ -1294,14 +2512,24 @@ func scanRepoFolder(name string) ScanEntry {
 	if data, err := os.ReadFile(pkgPath); err == nil {
 		entry.HasPackageJson = true
 		var pkg struct {
-			Name        string      `json:"name"`
-			Description string      `json:"description"`
-			Bin         interface{} `json:"bin"`
+			Name            string            `json:"name"`
+			Description     string            `json:"description"`
+			Dependencies    map[string]string `json:"dependencies"`
+			DevDependencies map[string]string `json:"devDependencies"`
 		}
 		if json.Unmarshal(data, &pkg) == nil {
 			entry.PackageName = pkg.Name
 			haystack := strings.ToLower(pkg.Name + " " + pkg.Description + " " + name)
-			entry.LooksLikeMcp = pkg.Bin != nil || strings.Contains(haystack, "mcp") || strings.Contains(haystack, "dokploy")
+			// A "bin" entry alone used to be treated as "looks like MCP", but
+			// that's true of nearly every CLI tool (installers, linters,
+			// scaffolders) — caveman-installer tripped this and got labeled
+			// an MCP Server despite being a skill installer. Depending on the
+			// actual MCP SDK is a real signal; a bin field isn't.
+			_, hasMcpSdk := pkg.Dependencies["@modelcontextprotocol/sdk"]
+			if !hasMcpSdk {
+				_, hasMcpSdk = pkg.DevDependencies["@modelcontextprotocol/sdk"]
+			}
+			entry.LooksLikeMcp = hasMcpSdk || strings.Contains(haystack, "mcp") || strings.Contains(haystack, "dokploy")
 		}
 	}
 
@@ -1457,6 +2685,57 @@ func scanRepoFolder(name string) ScanEntry {
 		}
 	}
 
+	// Local MCP command derivation: prefer a direct absolute-path invocation
+	// (node/python3 <file>) over StartCommand's npm/pnpm wrapper, since an
+	// external MCP client launches this process itself — a relative script
+	// path or bare npm-script name only works by luck if the client's own
+	// cwd happens to match repo/<name>.
+	if entry.StartCommand != "" && entry.StartCommand != "docker run" {
+		parts := strings.Fields(entry.StartCommand)
+		if len(parts) >= 2 && (parts[0] == "node" || parts[0] == "python" || parts[0] == "python3") {
+			scriptPath := parts[1]
+			if !filepath.IsAbs(scriptPath) {
+				scriptPath = filepath.Join(dir, scriptPath)
+			}
+			entry.LocalCommand = parts[0]
+			if entry.LocalCommand == "python" {
+				entry.LocalCommand = "python3"
+			}
+			entry.LocalArgs = append([]string{scriptPath}, parts[2:]...)
+		} else if len(parts) >= 1 {
+			entry.LocalCommand = parts[0]
+			entry.LocalArgs = parts[1:]
+		}
+	}
+
+	// RunMode + MissingTool: pick the one primary way to run this repo instead
+	// of showing every detected runtime as an equal option, and cross-check
+	// against what's actually installed system-wide (not just in this repo
+	// folder) so the UI can point at Sistem & Teşhis instead of a doomed retry.
+	enhancedEnv := getEnhancedEnv()
+	switch {
+	case entry.HasPackageJson:
+		entry.RunMode = "local"
+		if !commandExistsInEnv("node", enhancedEnv) {
+			entry.MissingTool = "node"
+		}
+	case containsRuntime(entry.Runtimes, "python"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("python3", enhancedEnv) && !commandExistsInEnv("python", enhancedEnv) {
+			entry.MissingTool = "python"
+		}
+	case containsRuntime(entry.Runtimes, "rust"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("cargo", enhancedEnv) {
+			entry.MissingTool = "cargo"
+		}
+	case containsRuntime(entry.Runtimes, "docker"):
+		entry.RunMode = "docker"
+		if !commandExistsInEnv("docker", enhancedEnv) {
+			entry.MissingTool = "docker"
+		}
+	}
+
 	repoStartErrorsMux.RLock()
 	if errStr, ok := repoStartErrors[name]; ok {
 		entry.HasStartError = true
@@ -1488,6 +2767,18 @@ func scanRepoFolder(name string) ScanEntry {
 	} else {
 		entry.RepoType = "other"
 		entry.RepoTypeLabel = "📁 Diğer"
+	}
+
+	// A skill/plugin repo (e.g. a bundle of agent skills with an installer
+	// CLI) isn't "started" as a local service — its real action is enabling
+	// the skill into an IDE, not npm-installing and running whatever script
+	// happened to be its only one (often "test"). Drop the run-mode fields so
+	// the UI doesn't offer a Kur & Başlat button that doesn't mean anything here.
+	if entry.RepoType == "skill" {
+		entry.RunMode = ""
+		entry.MissingTool = ""
+		entry.LocalCommand = ""
+		entry.LocalArgs = nil
 	}
 
 	return entry
@@ -1534,14 +2825,17 @@ func handleRepoStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task := addTask("start", name, fmt.Sprintf("%s projesi başlatılıyor (%s)...", name, startCmdStr))
+	startCtx, startCancel := context.WithCancel(context.Background())
+	task.attachCancel(startCancel)
 
 	parts := strings.Fields(startCmdStr)
-	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd := enhancedCommand(startCtx, parts[0], parts[1:]...)
 	cmd.Dir = dir
 
 	logActivity("repo-start", fmt.Sprintf("%s (%s)", name, startCmdStr))
 
 	go func() {
+		defer startCancel()
 		time.Sleep(500 * time.Millisecond)
 		if cmd.Process != nil {
 			pid := cmd.Process.Pid
@@ -1568,7 +2862,10 @@ func handleRepoStart(w http.ResponseWriter, r *http.Request) {
 		runningAppsMux.Unlock()
 
 		repoStartErrorsMux.Lock()
-		if err != nil {
+		if err != nil && startCtx.Err() == context.Canceled {
+			delete(repoStartErrors, name)
+			finishTask(task, "cancelled", fmt.Sprintf("%s durduruldu.", name))
+		} else if err != nil {
 			repoStartErrors[name] = outputStr
 			finishTask(task, "error", fmt.Sprintf("%s hatası: %s", name, outputStr))
 		} else {
@@ -1618,6 +2915,9 @@ func handleReposScan(w http.ResponseWriter, r *http.Request) {
 
 func handleCheckAllRepos(w http.ResponseWriter, r *http.Request) {
 	task := addTask("check-all", "Tüm Repolar", "Tüm yerel repoların GitHub güncellik durumları kontrol ediliyor...")
+	ctx, cancel := context.WithCancel(r.Context())
+	task.attachCancel(cancel)
+	defer cancel()
 
 	rootDir := filepath.Join(getBaseDir(), "repo")
 	dirEntries, err := os.ReadDir(rootDir)
@@ -1646,12 +2946,17 @@ func handleCheckAllRepos(w http.ResponseWriter, r *http.Request) {
 	results := []CheckResult{}
 	behindCount := 0
 
+	stopped := false
 	for _, de := range dirEntries {
+		if ctx.Err() != nil {
+			stopped = true
+			break
+		}
 		if !de.IsDir() {
 			continue
 		}
 		name := de.Name()
-		status, checkErr := gitCheck(name)
+		status, checkErr := gitCheck(ctx, name)
 		resItem := CheckResult{Name: name, Status: status}
 		if checkErr != nil {
 			resItem.Error = checkErr.Error()
@@ -1677,14 +2982,19 @@ func handleCheckAllRepos(w http.ResponseWriter, r *http.Request) {
 
 	_ = saveState(s)
 
-	msg := fmt.Sprintf("%d repo kontrol edildi.", len(results))
-	if behindCount > 0 {
-		msg += fmt.Sprintf(" %d repo için güncelleme mevcut!", behindCount)
+	if stopped {
+		finishTask(task, "cancelled", fmt.Sprintf("Kontrol durduruldu — %d repo tamamlandı.", len(results)))
+	} else {
+		msg := fmt.Sprintf("%d repo kontrol edildi.", len(results))
+		if behindCount > 0 {
+			msg += fmt.Sprintf(" %d repo için güncelleme mevcut!", behindCount)
+		}
+		finishTask(task, "completed", msg)
 	}
-	finishTask(task, "completed", msg)
 
 	writeJSON(w, 200, map[string]interface{}{
 		"ok":          true,
+		"stopped":     stopped,
 		"behindCount": behindCount,
 		"results":     results,
 	})
@@ -1851,9 +3161,12 @@ func getEnhancedEnv() []string {
 
 	extraPaths := []string{
 		filepath.Join(appData, "npm"),
+		filepath.Join(localAppData, "Microsoft", "WindowsApps"),
 		filepath.Join(localAppData, "Programs", "Python"),
 		filepath.Join(homeDir, ".cargo", "bin"),
 		filepath.Join(homeDir, ".local", "bin"),
+		filepath.Join(homeDir, ".orbstack", "bin"),
+		filepath.Join(homeDir, ".docker", "bin"),
 		filepath.Join(localAppData, "Programs", "Python", "Python312", "Scripts"),
 		filepath.Join(localAppData, "Programs", "Python", "Python311", "Scripts"),
 		filepath.Join(localAppData, "Programs", "Python", "Python310", "Scripts"),
@@ -1861,6 +3174,21 @@ func getEnhancedEnv() []string {
 		`C:\Program Files\Git\cmd`,
 		`C:\Program Files\nodejs`,
 		`C:\Program Files\Docker\Docker\resources\bin`,
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
+		"/usr/local/bin",
+		"/usr/local/sbin",
+		"/Applications/Docker.app/Contents/Resources/bin",
+	}
+
+	if pyBins, _ := filepath.Glob(filepath.Join(homeDir, "Library", "Python", "*", "bin")); len(pyBins) > 0 {
+		extraPaths = append(extraPaths, pyBins...)
+	}
+	if brewBins, _ := filepath.Glob("/opt/homebrew/Cellar/*/*/bin"); len(brewBins) > 0 {
+		extraPaths = append(extraPaths, brewBins...)
+	}
+	if usrBrewBins, _ := filepath.Glob("/usr/local/Cellar/*/*/bin"); len(usrBrewBins) > 0 {
+		extraPaths = append(extraPaths, usrBrewBins...)
 	}
 
 	pathEnv := os.Getenv("PATH")
@@ -1880,14 +3208,69 @@ func getEnhancedEnv() []string {
 	return newEnv
 }
 
+func resolveInEnv(name string, env []string) string {
+	if strings.ContainsRune(name, filepath.Separator) {
+		if info, err := os.Stat(name); err == nil && !info.IsDir() {
+			return name
+		}
+		return ""
+	}
+
+	exts := []string{""}
+	if runtime.GOOS == "windows" {
+		lower := strings.ToLower(name)
+		if !strings.HasSuffix(lower, ".exe") && !strings.HasSuffix(lower, ".cmd") && !strings.HasSuffix(lower, ".bat") {
+			exts = []string{"", ".exe", ".cmd", ".bat"}
+		}
+	}
+
+	for _, e := range env {
+		var dirs string
+		if strings.HasPrefix(strings.ToUpper(e), "PATH=") {
+			dirs = e[5:]
+		} else {
+			continue
+		}
+		for _, dir := range strings.Split(dirs, string(os.PathListSeparator)) {
+			if dir == "" {
+				continue
+			}
+			for _, ext := range exts {
+				candidate := filepath.Join(dir, name+ext)
+				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+					return candidate
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// commandExistsInEnv reports whether name can be resolved within env's PATH.
+func commandExistsInEnv(name string, env []string) bool {
+	return resolveInEnv(name, env) != ""
+}
+
+// enhancedCommand builds an exec.Cmd for name resolved against the
+// Homebrew/Windows-aware PATH from getEnhancedEnv (see resolveInEnv for why
+// this is necessary), with that same PATH passed through to the child.
+func enhancedCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	env := getEnhancedEnv()
+	resolved := resolveInEnv(name, env)
+	if resolved == "" {
+		resolved = name
+	}
+	cmd := exec.CommandContext(ctx, resolved, args...)
+	cmd.Env = env
+	return cmd
+}
+
 func checkToolVersion(candidates ...[]string) (bool, string) {
-	enhancedEnv := getEnhancedEnv()
 	for _, cand := range candidates {
 		if len(cand) == 0 {
 			continue
 		}
-		cmd := exec.Command(cand[0], cand[1:]...)
-		cmd.Env = enhancedEnv
+		cmd := enhancedCommand(context.Background(), cand[0], cand[1:]...)
 
 		out, err := cmd.CombinedOutput()
 		if err == nil {
@@ -1907,7 +3290,7 @@ func checkToolVersion(candidates ...[]string) (bool, string) {
 func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 	type ToolDef struct {
 		ID, Name, Category, Desc, InstallHint string
-		Candidates                             [][]string
+		Candidates                            [][]string
 	}
 
 	tools := []ToolDef{
@@ -1980,6 +3363,57 @@ func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type installCmdDef struct {
+	Name string
+	Cmd  string
+	Args []string
+}
+
+// buildInstallCmds returns the 1-click install command table for the current
+// OS. Windows (winget) and macOS (Homebrew) are first-class; Linux falls back
+// to apt-get on a best-effort basis (it typically needs sudo, so it will
+// often just surface a clear permission error rather than silently working).
+func buildInstallCmds() map[string]installCmdDef {
+	switch runtime.GOOS {
+	case "darwin":
+		return map[string]installCmdDef{
+			"pipx":   {"pipx", "python3", []string{"-m", "pip", "install", "--user", "pipx", "--break-system-packages"}},
+			"uvx":    {"uv / uvx", "python3", []string{"-m", "pip", "install", "uv", "--break-system-packages"}},
+			"pnpm":   {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
+			"npx":    {"npm/npx", "npm", []string{"install", "-g", "npm"}},
+			"git":    {"Git", "brew", []string{"install", "git"}},
+			"node":   {"Node.js", "brew", []string{"install", "node"}},
+			"python": {"Python 3", "brew", []string{"install", "python@3.12"}},
+			"cargo":  {"Rust / Cargo", "brew", []string{"install", "rust"}},
+			"docker": {"Docker Desktop", "brew", []string{"install", "--cask", "docker"}},
+		}
+	case "windows":
+		return map[string]installCmdDef{
+			"pipx":   {"pipx", "python", []string{"-m", "pip", "install", "--user", "pipx"}},
+			"uvx":    {"uv / uvx", "python", []string{"-m", "pip", "install", "uv"}},
+			"pnpm":   {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
+			"npx":    {"npm/npx", "npm", []string{"install", "-g", "npm"}},
+			"git":    {"Git", "winget", []string{"install", "--id", "Git.Git", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"node":   {"Node.js", "winget", []string{"install", "--id", "OpenJS.NodeJS.LTS", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"python": {"Python 3", "winget", []string{"install", "--id", "Python.Python.3.12", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"cargo":  {"Rustup", "winget", []string{"install", "--id", "Rustlang.Rustup", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"docker": {"Docker Desktop", "winget", []string{"install", "--id", "Docker.DockerDesktop", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+		}
+	default: // linux (best-effort)
+		return map[string]installCmdDef{
+			"pipx":   {"pipx", "python3", []string{"-m", "pip", "install", "--user", "pipx"}},
+			"uvx":    {"uv / uvx", "python3", []string{"-m", "pip", "install", "uv"}},
+			"pnpm":   {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
+			"npx":    {"npm/npx", "npm", []string{"install", "-g", "npm"}},
+			"git":    {"Git", "apt-get", []string{"install", "-y", "git"}},
+			"node":   {"Node.js", "apt-get", []string{"install", "-y", "nodejs", "npm"}},
+			"python": {"Python 3", "apt-get", []string{"install", "-y", "python3", "python3-pip"}},
+			"cargo":  {"Rust / Cargo", "apt-get", []string{"install", "-y", "cargo"}},
+			"docker": {"Docker Engine", "apt-get", []string{"install", "-y", "docker.io"}},
+		}
+	}
+}
+
 func handleSystemInstall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID string `json:"id"`
@@ -1989,50 +3423,56 @@ func handleSystemInstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	installCmds := map[string]struct {
-		Name string
-		Cmd  string
-		Args []string
-	}{
-		"pipx":   {"pipx", "python", []string{"-m", "pip", "install", "--user", "pipx"}},
-		"uvx":    {"uv / uvx", "python", []string{"-m", "pip", "install", "uv"}},
-		"pnpm":   {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
-		"npx":    {"npm/npx", "npm", []string{"install", "-g", "npm"}},
-		"git":    {"Git", "winget", []string{"install", "--id", "Git.Git", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-		"node":   {"Node.js", "winget", []string{"install", "--id", "OpenJS.NodeJS.LTS", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-		"python": {"Python 3", "winget", []string{"install", "--id", "Python.Python.3.12", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-		"cargo":  {"Rustup", "winget", []string{"install", "--id", "Rustlang.Rustup", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-		"docker": {"Docker Desktop", "winget", []string{"install", "--id", "Docker.DockerDesktop", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-	}
-
-	toolInfo, ok := installCmds[body.ID]
+	toolInfo, ok := buildInstallCmds()[body.ID]
 	if !ok {
 		writeErr(w, 400, "otomatik kurulum komutu bulunamadı")
 		return
 	}
 
+	if toolInfo.Cmd == "brew" && !commandExistsInEnv("brew", getEnhancedEnv()) {
+		writeErr(w, 424, "Homebrew kurulu değil. Önce https://brew.sh üzerinden Homebrew'i kurun, ardından bu aracı tekrar deneyin.")
+		return
+	}
+
 	cmdStr := toolInfo.Cmd + " " + strings.Join(toolInfo.Args, " ")
 	task := addTask("system-install", toolInfo.Name, fmt.Sprintf("%s otomatik kuruluyor (%s)...", toolInfo.Name, cmdStr))
+	installCtx, installCancel := context.WithCancel(context.Background())
+	task.attachCancel(installCancel)
 
 	logActivity("system-install", fmt.Sprintf("%s (%s)", toolInfo.Name, cmdStr))
 
 	go func() {
-		cmd := exec.Command(toolInfo.Cmd, toolInfo.Args...)
-		cmd.Env = getEnhancedEnv()
+		defer installCancel()
+		cmd := enhancedCommand(installCtx, toolInfo.Cmd, toolInfo.Args...)
 		out, err := cmd.CombinedOutput()
 		outputStr := strings.TrimSpace(string(out))
+
+		if err != nil && installCtx.Err() == context.Canceled {
+			finishTask(task, "cancelled", fmt.Sprintf("%s kurulumu durduruldu.", toolInfo.Name))
+			return
+		}
 
 		if err != nil && (body.ID == "pipx" || body.ID == "uvx") {
 			fbTarget := body.ID
 			if body.ID == "uvx" {
 				fbTarget = "uv"
 			}
-			fbCmd := exec.Command("pip", "install", fbTarget)
-			fbCmd.Env = getEnhancedEnv()
+			pyBin := "python"
+			if runtime.GOOS != "windows" {
+				pyBin = "python3"
+			}
+			fbCmd := enhancedCommand(context.Background(), pyBin, "-m", "pip", "install", fbTarget, "--break-system-packages")
 			fbOut, fbErr := fbCmd.CombinedOutput()
 			if fbErr == nil {
 				err = nil
 				outputStr = strings.TrimSpace(string(fbOut))
+			} else {
+				fbCmd2 := enhancedCommand(context.Background(), pyBin, "-m", "pip", "install", "--user", fbTarget)
+				fbOut2, fbErr2 := fbCmd2.CombinedOutput()
+				if fbErr2 == nil {
+					err = nil
+					outputStr = strings.TrimSpace(string(fbOut2))
+				}
 			}
 		}
 
@@ -2040,7 +3480,11 @@ func handleSystemInstall(w http.ResponseWriter, r *http.Request) {
 			finishTask(task, "error", fmt.Sprintf("%s kurulum hatası: %s", toolInfo.Name, outputStr))
 		} else {
 			if body.ID == "pipx" {
-				_ = exec.Command("python", "-m", "pipx", "ensurepath").Run()
+				pyBin := "python"
+				if runtime.GOOS != "windows" {
+					pyBin = "python3"
+				}
+				_ = enhancedCommand(context.Background(), pyBin, "-m", "pipx", "ensurepath").Run()
 			}
 			finishTask(task, "completed", fmt.Sprintf("✅ %s kurulumu tamamlandı!", toolInfo.Name))
 		}
@@ -2098,9 +3542,11 @@ func handleRunningApps(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, results)
 }
 
-func handleAppKill(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-
+// killRunningApp stops name's tracked process (if any) and its docker
+// container (if any). Shared by the explicit "Durdur" button and repo
+// deletion, so removing a repo can never leave an orphaned process running
+// against a directory that no longer exists.
+func killRunningApp(name string) {
 	runningAppsMux.Lock()
 	app, ok := runningAppsMap[name]
 	if ok {
@@ -2119,8 +3565,12 @@ func handleAppKill(w http.ResponseWriter, r *http.Request) {
 	}
 
 	safeTag := "ai-toolkit-" + sanitizeDockerTag(name)
-	_ = exec.Command("docker", "stop", safeTag+"-run").Run()
+	_ = enhancedCommand(context.Background(), "docker", "stop", safeTag+"-run").Run()
+}
 
+func handleAppKill(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	killRunningApp(name)
 	logActivity("app-kill", fmt.Sprintf("%s durduruldu", name))
 
 	writeJSON(w, 200, map[string]interface{}{
@@ -2258,16 +3708,15 @@ func handleLoopAutoHeal(w http.ResponseWriter, r *http.Request) {
 
 	if containsRuntime(entry.Runtimes, "python") {
 		healActionStr = "python -m pip install --upgrade --force-reinstall -r requirements.txt"
-		healCmd = exec.Command("python", "-m", "pip", "install", "--upgrade", "--force-reinstall", "-r", "requirements.txt")
+		healCmd = enhancedCommand(context.Background(), "python", "-m", "pip", "install", "--upgrade", "--force-reinstall", "-r", "requirements.txt")
 	} else if containsRuntime(entry.Runtimes, "rust") {
 		healActionStr = "cargo clean"
-		healCmd = exec.Command("cargo", "clean")
+		healCmd = enhancedCommand(context.Background(), "cargo", "clean")
 	} else {
-		healCmd = exec.Command("npm", "install", "--force")
+		healCmd = enhancedCommand(context.Background(), "npm", "install", "--force")
 	}
 
 	healCmd.Dir = dir
-	healCmd.Env = getEnhancedEnv()
 	out, healErr := healCmd.CombinedOutput()
 	outStr := strings.TrimSpace(string(out))
 
@@ -2301,9 +3750,12 @@ func handleLoopVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parts := strings.Fields(body.Command)
-	cmd := exec.Command(parts[0], parts[1:]...)
+	if len(parts) == 0 {
+		writeErr(w, 400, "geçersiz doğrulama komutu")
+		return
+	}
+	cmd := enhancedCommand(r.Context(), parts[0], parts[1:]...)
 	cmd.Dir = dir
-	cmd.Env = getEnhancedEnv()
 
 	out, err := cmd.CombinedOutput()
 	outStr := strings.TrimSpace(string(out))
@@ -2404,7 +3856,7 @@ const defaultPort = 47651
 
 type StartupCheck struct {
 	Name    string `json:"name"`
-	Status  string `json:"status"`  // "ok", "warn", "error"
+	Status  string `json:"status"` // "ok", "warn", "error"
 	Message string `json:"message"`
 }
 
@@ -2540,11 +3992,11 @@ func runStartupChecks(baseDir string) {
 	}
 	missingRuntimes := []string{}
 	for tool := range runtimes {
-		cmd := exec.Command(tool, "--version")
+		versionArg := "--version"
 		if tool == "go" {
-			cmd = exec.Command("go", "version")
+			versionArg = "version"
 		}
-		if err := cmd.Run(); err != nil {
+		if err := enhancedCommand(context.Background(), tool, versionArg).Run(); err != nil {
 			missingRuntimes = append(missingRuntimes, tool)
 		}
 	}
@@ -2582,6 +4034,9 @@ func runServer() {
 	// Run startup checks in background before serving
 	go runStartupChecks(baseDir)
 
+	// Start 1-second background sync controller (smart idle)
+	runBackgroundSyncController()
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/state", handleState)
@@ -2589,17 +4044,27 @@ func runServer() {
 	mux.HandleFunc("POST /api/state/migrate", handleStateMigrate)
 	mux.HandleFunc("GET /api/startup/status", handleStartupStatus)
 	mux.HandleFunc("GET /api/ides/detect", handleIdesDetect)
+	mux.HandleFunc("GET /api/ides/master", handleIdesGetMaster)
+	mux.HandleFunc("POST /api/ides/master", handleIdesSetMaster)
+	mux.HandleFunc("POST /api/ides/sync-master", handleIdesSyncMaster)
+	mux.HandleFunc("GET /api/ides/diff", handleIdeDiff)
+	mux.HandleFunc("GET /api/marketplace/catalog", handleMarketplaceCatalog)
+	mux.HandleFunc("POST /api/marketplace/install", handleMarketplaceInstall)
 	mux.HandleFunc("POST /api/ides/backup", handleIdeBackup)
 	mux.HandleFunc("POST /api/ides/{id}/danger-delete", handleDangerDelete)
 	mux.HandleFunc("POST /api/repos/{name}/check", handleRepoCheck)
 	mux.HandleFunc("POST /api/repos/{name}/pull", handleRepoPull)
 	mux.HandleFunc("POST /api/repos/{name}/delete", handleRepoDelete)
 	mux.HandleFunc("POST /api/repos/{name}/run", handleRepoRun)
+	mux.HandleFunc("POST /api/repos/{name}/enable-skill", handleRepoEnableSkill)
+	mux.HandleFunc("POST /api/skills/sync-all", handleSkillsSyncAll)
 	mux.HandleFunc("POST /api/repos/{name}/start", handleRepoStart)
 	mux.HandleFunc("GET /api/repos/scan", handleReposScan)
 	mux.HandleFunc("POST /api/repos/check-all", handleCheckAllRepos)
 	mux.HandleFunc("GET /api/activity", handleActivity)
 	mux.HandleFunc("GET /api/tasks", handleTasks)
+	mux.HandleFunc("POST /api/tasks/{id}/stop", handleTaskStop)
+	mux.HandleFunc("DELETE /api/tasks/{id}", handleTaskDelete)
 	mux.HandleFunc("GET /api/apps/running", handleRunningApps)
 	mux.HandleFunc("POST /api/apps/{name}/kill", handleAppKill)
 	mux.HandleFunc("GET /api/system/health", handleSystemHealth)
@@ -2683,7 +4148,7 @@ func runOnceCli() {
 	fmt.Println()
 
 	for _, ide := range ides {
-		count, err := syncToIde(ide.Path, template)
+		count, err := syncToIde(ide, template)
 		if err != nil {
 			fmt.Printf(" ⚠️ %s senkronize edilemedi: %v\n", ide.Name, err)
 		} else {

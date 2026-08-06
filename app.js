@@ -150,7 +150,12 @@ let selectedCategory = 'All';
 function loadMcpServers() {
   const saved = localStorage.getItem('aitoolkit_mcp_servers');
   if (saved) { try { return JSON.parse(saved); } catch (e) {} }
-  return DEFAULT_MCP_SERVERS;
+  // No built-in external MCP catalog — the app only ever knows about MCPs
+  // the user explicitly added (from a scanned repo or the "Yeni MCP Ekle"
+  // modal). DEFAULT_MCP_SERVERS used to seed this on first load, which meant
+  // 11 unrelated servers (Dokploy, Supabase, n8n, Meta Ads, ...) got synced
+  // into every real IDE config without the user ever asking for them.
+  return [];
 }
 
 function saveMcpServers(servers) {
@@ -172,7 +177,10 @@ function saveRecommendedRepos(repos) {
 function loadIdePaths() {
   const saved = localStorage.getItem('aitoolkit_ide_paths');
   if (saved) { try { return JSON.parse(saved); } catch (e) {} }
-  return DEFAULT_IDE_PATHS;
+  // DEFAULT_IDE_PATHS is hardcoded Windows paths (C:\Users\Admin\...) — real
+  // detection (autoDetectIdes / GET /api/state) is what actually populates
+  // this; an empty starting point beats phantom paths that exist nowhere.
+  return [];
 }
 
 function saveIdePaths(paths) {
@@ -247,7 +255,10 @@ function pushStateToBackend() {
     try {
       const bundle = {
         mcpServers: activeMcpServers,
-        recommendedRepos: activeRecommendedRepos,
+        // Backend auto-clones anything sent here with a repo field — only send
+        // repos the user explicitly pulled from GitHub Arama (tagged 'GitHub'),
+        // never the built-in default skill catalog, which is browse-only.
+        recommendedRepos: activeRecommendedRepos.filter(s => s.category === 'GitHub'),
         idePaths: activeIdePaths
       };
       const res = await fetch(`${API_BASE}/api/state`, {
@@ -549,6 +560,15 @@ function renderMcps() {
   const container = document.getElementById('mcp-grid');
   const countBadge = document.getElementById('mcp-count-badge');
   if (countBadge) countBadge.innerText = activeMcpServers.length;
+
+  const filterBar = document.getElementById('mcp-category-filter');
+  if (filterBar) {
+    const categories = ['All', ...new Set(activeMcpServers.map(s => s.category).filter(Boolean))];
+    filterBar.innerHTML = categories.map(cat => `
+      <button onclick="filterMcpCategory('${cat}')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer transition-all ${selectedCategory === cat ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}">${cat === 'All' ? 'Tümü' : escapeHtml(cat)}</button>
+    `).join('');
+  }
+
   if (!container) return;
 
   const filtered = selectedCategory === 'All' ? activeMcpServers : activeMcpServers.filter(s => s.category === selectedCategory);
@@ -559,7 +579,7 @@ function renderMcps() {
     const badgeColor = s.badge === 'Resmi' ? 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30' : (s.badge === 'Self-Host' ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30');
 
     return `
-      <div class="glass-card flex flex-col justify-between space-y-3">
+      <div id="mcp-card-${s.id}" class="glass-card flex flex-col justify-between space-y-3">
         <div>
           <div class="flex items-center justify-between mb-2">
             <div class="flex items-center gap-2">
@@ -602,6 +622,207 @@ function renderMcps() {
     `;
   }).join('');
   if (window.lucide) lucide.createIcons();
+
+  const scrollTargetId = sessionStorage.getItem('wyvdev_scroll_to_mcp');
+  if (scrollTargetId) {
+    const card = document.getElementById(`mcp-card-${scrollTargetId}`);
+    if (card) {
+      sessionStorage.removeItem('wyvdev_scroll_to_mcp');
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.add('ring-2', 'ring-cyan-400', 'ring-offset-2', 'ring-offset-gray-950');
+      setTimeout(() => card.classList.remove('ring-2', 'ring-cyan-400', 'ring-offset-2', 'ring-offset-gray-950'), 2500);
+    }
+  }
+}
+
+// Jumps from a repo card's "MCP ekli — Düzenle" to its variable editor on
+// the IDE Dosya Yolları page instead of leaving it as a dead-end label.
+// Opens an in-place popup with the MCP's editable variables — MCPs are only
+// ever added from the repo scan or the header modal; editing an existing one
+// happens right here, not on a separate IDE Dosya Yolları page.
+function goToMcpConfig(id) {
+  openMcpEditModal(id);
+}
+
+function openMcpEditModal(id) {
+  const s = activeMcpServers.find(m => m.id === id);
+  const modal = document.getElementById('mcp-edit-modal');
+  const body = document.getElementById('mcp-edit-body');
+  const title = document.getElementById('mcp-edit-title');
+  if (!s || !modal || !body) return;
+
+  if (title) title.textContent = s.name || s.id;
+  modal.dataset.mcpId = id;
+
+  // Repo-detected MCPs (addMcpFromScan) don't ship a known env schema — we
+  // can't know a package needs e.g. DOKPLOY_URL until it actually throws for
+  // a missing one. So always offer an "add variable" row, not just editing
+  // whatever env keys happen to already exist.
+  const fields = s.env ? Object.keys(s.env) : (s.headers ? Object.keys(s.headers) : []);
+  body.innerHTML = `
+    <p class="text-gray-400 leading-relaxed">${escapeHtml(s.desc || 'Açıklama girilmedi.')}</p>
+    <div class="text-[11px] font-mono text-gray-500 border-t border-gray-800/80 pt-2">
+      ${s.url ? `URL: <span class="text-cyan-400">${escapeHtml(s.url)}</span>` : `Komut: <span class="text-emerald-400">${escapeHtml(s.command || '')} ${escapeHtml((s.args || []).join(' '))}</span>`}
+      ${s.cwd ? `<div class="mt-1">Dizin: <span class="text-gray-400">${escapeHtml(s.cwd)}</span></div>` : ''}
+    </div>
+    <div class="p-3 rounded-xl bg-gray-950/60 border border-amber-500/20 space-y-2 mt-2">
+      <p class="text-[10px] font-semibold text-amber-400 flex items-center gap-1">
+        <i data-lucide="key-round" class="w-3 h-3"></i> API Key & Parametreler
+      </p>
+      ${fields.length ? fields.map(f => {
+        const val = s.env ? (s.env[f] || '') : (s.headers[f] || '');
+        return `
+          <div class="flex items-end gap-1.5">
+            <div class="flex-1 space-y-1">
+              <label class="text-[9px] font-mono text-gray-400 block">${escapeHtml(f)}:</label>
+              <input type="text" data-env-key="${escapeHtml(f)}" value="${escapeHtml(val)}" onchange="updateKey('${s.id}', '${f}', this.value)" placeholder="Anahtar veya URL..." class="glass-input text-xs py-1" />
+            </div>
+            <button onclick="removeMcpEnvVar('${s.id}', '${f}')" title="Bu değişkeni sil" class="p-1.5 rounded-lg text-gray-500 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>
+          </div>
+        `;
+      }).join('') : `<p class="text-[11px] text-gray-500">Henüz değişken eklenmedi — paket çalışma zamanında hata veriyorsa (ör. "Environment variable X is not defined"), o ismi aşağıya ekleyin.</p>`}
+      <div class="flex items-end gap-1.5 pt-2 border-t border-gray-800/60">
+        <div class="flex-1 space-y-1">
+          <label class="text-[9px] font-mono text-gray-400 block">Yeni değişken adı:</label>
+          <input id="mcp-new-var-key" type="text" placeholder="ör. DOKPLOY_URL" class="glass-input text-xs py-1 font-mono" />
+        </div>
+        <div class="flex-1 space-y-1">
+          <label class="text-[9px] font-mono text-gray-400 block">Değer:</label>
+          <input id="mcp-new-var-value" type="text" placeholder="değer..." class="glass-input text-xs py-1" />
+        </div>
+        <button onclick="addMcpEnvVar('${s.id}')" title="Değişken ekle" class="p-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white cursor-pointer"><i data-lucide="plus" class="w-3.5 h-3.5"></i></button>
+      </div>
+    </div>
+  `;
+  modal.classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
+}
+
+function addMcpEnvVar(id) {
+  const keyInput = document.getElementById('mcp-new-var-key');
+  const valueInput = document.getElementById('mcp-new-var-value');
+  const key = (keyInput?.value || '').trim();
+  if (!key) {
+    showToast('⚠️ Değişken adı boş olamaz.');
+    return;
+  }
+  const server = activeMcpServers.find(s => s.id === id);
+  if (!server) return;
+  if (!server.env) server.env = {};
+  server.env[key] = valueInput?.value || '';
+  saveMcpServers(activeMcpServers);
+  showToast(`'${key}' değişkeni eklendi.`);
+  openMcpEditModal(id);
+}
+
+function removeMcpEnvVar(id, key) {
+  const server = activeMcpServers.find(s => s.id === id);
+  if (!server || !server.env) return;
+  delete server.env[key];
+  saveMcpServers(activeMcpServers);
+  openMcpEditModal(id);
+}
+
+function closeMcpEditModal() {
+  const modal = document.getElementById('mcp-edit-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+// Explicit "Kaydet" — flushes every field (in case one's still focused and
+// hasn't fired its own onchange yet), then pushes immediately and shows the
+// real per-IDE sync result, instead of relying on the silent debounced push.
+async function saveMcpEditModal(id) {
+  const server = activeMcpServers.find(s => s.id === id);
+  if (!server) return;
+
+  document.querySelectorAll('#mcp-edit-body input[data-env-key]').forEach(input => {
+    if (!server.env) server.env = {};
+    server.env[input.dataset.envKey] = input.value;
+  });
+  localStorage.setItem('aitoolkit_mcp_servers', JSON.stringify(activeMcpServers));
+
+  const btn = document.querySelector('#mcp-edit-modal button[onclick*="saveMcpEditModal"]');
+  const originalLabel = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Kaydediliyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+  try {
+    const syncData = await pushStateNow();
+    closeMcpEditModal();
+    showToast(`✓ ${server.name || server.id} MCP ayarları kaydedildi.`);
+    summarizeSyncResult(syncData);
+  } catch (e) {
+    showToast('⚠️ Kaydetme hatası: ' + e.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+// Immediate (non-debounced) push — used wherever the user takes an explicit
+// "save"/"sync" action and expects to see the real result right away, unlike
+// pushStateToBackend's silent 400ms-debounced background push.
+async function pushStateNow() {
+  const res = await fetch(`${API_BASE}/api/state`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mcpServers: activeMcpServers,
+      recommendedRepos: activeRecommendedRepos.filter(s => s.category === 'GitHub'),
+      idePaths: activeIdePaths
+    })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Senkronizasyon başarısız');
+  return data;
+}
+
+async function syncMcpsToIdes(btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Senkronize ediliyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+  try {
+    summarizeSyncResult(await pushStateNow());
+  } catch (e) {
+    showToast('⚠️ MCP senkronizasyon hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+async function syncSkillsToIdes(btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Senkronize ediliyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/skills/sync-all`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Senkronizasyon başarısız');
+    showToast(data.message || `✅ ${data.skillsSynced} skill senkronize edildi.`);
+  } catch (e) {
+    showToast('⚠️ Skill senkronizasyon hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
 }
 
 async function installSkillCommand(repo, extra = '--all', btnEl) {
@@ -867,6 +1088,9 @@ function buildConfigObject() {
       }
     } else {
       config.mcpServers[s.id] = { command: s.command, args: s.args || [] };
+      if (s.cwd) {
+        config.mcpServers[s.id].cwd = s.cwd;
+      }
       if (s.env) {
         config.mcpServers[s.id].env = s.env;
       }
@@ -947,17 +1171,15 @@ function downloadJsonFile() {
 }
 
 function resetToDefaultMcps() {
-  if (confirm('Tüm MCP sunucularını, IDE yollarını ve önerilen repoları varsayılan fabrika ayarlarına sıfırlamak istiyor musunuz?')) {
-    activeMcpServers = DEFAULT_MCP_SERVERS;
+  if (confirm('Tüm MCP sunucularını silmek, IDE yollarını yeniden taramak ve skill kataloğunu varsayılana döndürmek istiyor musunuz?')) {
+    activeMcpServers = [];
     activeRecommendedRepos = DEFAULT_RECOMMENDED_REPOS;
-    activeIdePaths = DEFAULT_IDE_PATHS;
     saveMcpServers(activeMcpServers);
     saveRecommendedRepos(activeRecommendedRepos);
-    saveIdePaths(activeIdePaths);
     renderMcps();
     renderSkills();
-    renderIdePaths();
-    showToast('Tüm ayarlar varsayılan ayarlara sıfırlandı.');
+    autoDetectIdes(true);
+    showToast('MCP sunucuları temizlendi, IDE yolları yeniden tarandı.');
   }
 }
 
@@ -1049,16 +1271,6 @@ function importState(file) {
       showToast(result.message || `🎉 WyvDev yedek paketi başarıyla yüklendi (${clonedCount} repo klonlanıyor).`);
     } catch (err) {
       showToast('⚠️ Geçersiz yedek JSON dosyası: ' + err.message);
-    }
-  };
-  reader.readAsText(file);
-}
-      if (!res.ok) throw new Error('backend reddetti');
-      setBackendStatus(true);
-      showToast('✅ İçe aktarma tamamlandı — git yolu içeren skiller yerelde yoksa otomatik klonlanacak.');
-      renderTrackedRepos();
-    } catch (e) {
-      showToast('⚠️ İçe aktarma hatası: ' + e.message);
     }
   };
   reader.readAsText(file);
@@ -1162,10 +1374,28 @@ async function loadLibraryScan() {
     lastScanResults = await res.json();
     setBackendStatus(true);
     renderLibraryScan();
+    updateRepoCountBadge(lastScanResults.length);
   } catch (e) {
     setBackendStatus(false);
     tbody.innerHTML = `<tr><td colspan="3" class="text-xs text-red-400 text-center py-6">Backend'e ulaşılamıyor. ai-toolkit.exe çalışıyor mu?</td></tr>`;
   }
+}
+
+// Sidebar badge always reflects what's actually cloned into repo/ — not the
+// (unrelated) MCP catalog or skill catalog counts that used to sit here.
+async function updateRepoCountBadge(knownCount) {
+  const badge = document.getElementById('repo-count-badge');
+  if (!badge) return;
+  if (typeof knownCount === 'number') {
+    badge.innerText = knownCount;
+    return;
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/scan`);
+    if (!res.ok) return;
+    const repos = await res.json() || [];
+    badge.innerText = repos.length;
+  } catch (e) {}
 }
 
 async function startRepoProject(name, btnEl) {
@@ -1204,6 +1434,118 @@ async function repairRepoProject(name, runtimes, btnEl) {
   }, 2500);
 }
 
+function goToSystemDiagnostics(tool) {
+  showToast(`⚠️ '${tool}' kurulu değil — Sistem & Teşhis sayfasına yönlendiriliyorsunuz.`);
+  setTimeout(() => { window.location.href = 'settings.html'; }, 900);
+}
+
+// Single-click install+start: chains the right install action for this repo's
+// runtime, then starts it — replaces the old "Kur (npm)" + separate "Başlat"
+// two-step flow.
+async function installAndStart(name, runtimes, btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  const setLabel = (text) => {
+    if (!btnEl) return;
+    btnEl.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> ${text}`;
+    if (window.lucide) lucide.createIcons();
+  };
+  if (btnEl) btnEl.disabled = true;
+
+  const action = runtimes.includes('node') ? 'npm-install'
+    : runtimes.includes('python') ? 'pip-install'
+    : runtimes.includes('rust') ? 'cargo-build'
+    : null;
+
+  try {
+    if (action) {
+      setLabel('Kuruluyor...');
+      const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action })
+      });
+      const data = await res.json();
+      if (!res.ok || data.ok === false) throw new Error(data.error || 'Kurulum başarısız');
+    }
+    setLabel('Başlatılıyor...');
+    const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/start`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Başlatılamadı');
+    showToast(data.message || `🚀 '${name}' başlatıldı.`);
+  } catch (e) {
+    showToast('⚠️ ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+    loadLibraryScan();
+  }
+}
+
+// Docker-mode equivalent of installAndStart: build the image, then run it.
+async function dockerInstallAndRun(name, btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  const setLabel = (text) => {
+    if (!btnEl) return;
+    btnEl.innerHTML = `<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> ${text}`;
+    if (window.lucide) lucide.createIcons();
+  };
+  if (btnEl) btnEl.disabled = true;
+
+  try {
+    setLabel('Docker Build...');
+    let res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'docker-build' })
+    });
+    let data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || 'Docker build başarısız');
+
+    setLabel('Docker Başlatılıyor...');
+    res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/run`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'docker-run' })
+    });
+    data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.error || 'Docker run başarısız');
+    showToast(`🐳 '${name}' docker konteynerinde başlatıldı.`);
+  } catch (e) {
+    showToast('⚠️ ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+    loadLibraryScan();
+  }
+}
+
+// Copies the skill straight into every IDE that has a skills folder (today:
+// Claude Code CLI) — the real "enable" action, not just adding a catalog entry.
+async function enableSkillToIdes(name, btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Etkinleştiriliyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/enable-skill`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Etkinleştirilemedi');
+    showToast(data.message || `✅ '${name}' skill'i etkinleştirildi.`);
+  } catch (e) {
+    showToast('⚠️ ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
 let libraryViewMode = localStorage.getItem('aitoolkit_library_view') || 'table';
 
 function setLibraryViewMode(mode) {
@@ -1237,7 +1579,7 @@ function renderLibraryScan() {
   if (!tbody && !gridContainer) return;
 
   const typeFilter = document.getElementById('repo-type-filter')?.value || 'all';
-  const sortBy = document.getElementById('repo-sort-by')?.value || 'name';
+  const sortBy = document.getElementById('repo-sort-by')?.value || 'grouped';
 
   SessionStore.set('repo_type_filter', typeFilter);
   SessionStore.set('repo_sort_by', sortBy);
@@ -1247,15 +1589,6 @@ function renderLibraryScan() {
   if (typeFilter !== 'all') {
     filtered = filtered.filter(e => e.repoType === typeFilter);
   }
-
-  // 2. Sort
-  filtered.sort((a, b) => {
-    if (sortBy === 'name') return a.name.localeCompare(b.name);
-    if (sortBy === 'running') return (b.isRunning ? 1 : 0) - (a.isRunning ? 1 : 0);
-    if (sortBy === 'installed') return (b.isInstalled ? 1 : 0) - (a.isInstalled ? 1 : 0);
-    if (sortBy === 'type') return (a.repoType || '').localeCompare(b.repoType || '');
-    return 0;
-  });
 
   if (!filtered.length) {
     const emptyHtml = `<div class="text-xs text-gray-400 text-center py-8 col-span-full">Filtreye uygun proje veya repo bulunamadı.</div>`;
@@ -1279,109 +1612,188 @@ function renderLibraryScan() {
     other: 'bg-gray-700/40 text-gray-400 border-gray-600/40'
   };
 
-  // Render Table View
-  if (tbody) {
-    tbody.innerHTML = filtered.map((entry, i) => {
-      const runtimes = entry.runtimes || [];
-      const typeStyle = TYPE_BADGE_STYLE[entry.repoType] || TYPE_BADGE_STYLE.other;
-      const typeBadge = `<span class="text-[10px] font-bold px-2 py-0.5 rounded border ${typeStyle}">${escapeHtml(entry.repoTypeLabel || '📁 Diğer')}</span>`;
+  const GROUPS = [
+    { key: 'mcp', title: '🔌 MCP Sunucuları (MCP Servers)', color: 'text-cyan-400', icon: 'server' },
+    { key: 'skill', title: '📄 AI Skills', color: 'text-emerald-400', icon: 'sparkles' },
+    { key: 'service', title: '⚡ Servis ve Uygulamalar', color: 'text-amber-400', icon: 'zap' },
+    { key: 'library', title: '📦 Kütüphaneler', color: 'text-purple-400', icon: 'folder-git-2' },
+    { key: 'other', title: '📁 Diğer Projeler', color: 'text-gray-400', icon: 'folder' }
+  ];
 
-      const badges = [
-        typeBadge,
-        entry.gitStatus ? statusToBadge(entry.gitStatus) : '',
-        ...runtimes.map(rt => `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-gray-700/40 text-gray-300 border border-gray-600/40">${RUNTIME_BADGE[rt] || rt}</span>`)
-      ].filter(Boolean).join(' ');
-
-      const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
-      const alreadyMcp = activeMcpServers.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
-
-      const installs = [];
-      if (entry.isRunning) {
-        const portTxt = entry.runningPort ? `Port: ${entry.runningPort}` : 'Aktif';
-        installs.push(`<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">🟢 Çalışıyor (${portTxt})</span>`);
-      } else if (entry.hasStartError) {
-        installs.push(`<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30" title="${escapeHtml(entry.startErrorMsg || '')}">⚠️ Çalıştırma Hatası</span>`);
-      } else if (entry.isInstalled) {
-        installs.push(`<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">✓ Bağımlılıklar Yüklü (%100)</span>`);
-      } else {
-        installs.push(`<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">⚠️ Yükleme Gerekli</span>`);
-        if (runtimes.includes('node')) installs.push(`<button onclick="runRepoAction('${entry.name}', 'npm-install', this)" class="px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Kur (npm)</button>`);
-        if (runtimes.includes('python')) installs.push(`<button onclick="runRepoAction('${entry.name}', 'pip-install', this)" class="px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Kur (pip)</button>`);
-        if (runtimes.includes('rust')) installs.push(`<button onclick="runRepoAction('${entry.name}', 'cargo-build', this)" class="px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Derle (cargo)</button>`);
-        if (runtimes.includes('docker')) installs.push(`<button onclick="runRepoAction('${entry.name}', 'docker-build', this)" class="px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-blue-900/60 hover:bg-blue-800 text-blue-200 cursor-pointer">Docker Build</button>`);
-      }
-
-      const actions = [];
-      if (entry.isRunning) {
-        actions.push(`<button onclick="killRunningApp('${entry.name}', this)" class="px-3 py-1 rounded-xl text-[11px] font-bold bg-red-600 hover:bg-red-500 text-white shadow-lg cursor-pointer transition-all active:scale-95 flex items-center gap-1.5"><i data-lucide="square" class="w-3.5 h-3.5 fill-current"></i> 🛑 Durdur</button>`);
-      } else if (entry.hasStartError) {
-        actions.push(`<button onclick="repairRepoProject('${entry.name}', ${JSON.stringify(runtimes).replace(/"/g, '&quot;')}, this)" title="Bağımlılıkları ve ortamı zorla yenile/onar" class="px-3 py-1 rounded-xl text-[11px] font-bold bg-gradient-to-r from-amber-600 to-red-600 hover:from-amber-500 hover:to-red-500 text-white shadow-lg cursor-pointer transition-all active:scale-95 flex items-center gap-1.5"><i data-lucide="wrench" class="w-3.5 h-3.5 fill-current"></i> 🔧 Onar (Repair)</button>`);
-      } else if (entry.isInstalled || entry.startCommand) {
-        const startCmd = entry.startCommand || 'npm start';
-        actions.push(`<button onclick="startRepoProject('${entry.name}', null, this)" title="Çalıştır: ${escapeHtml(startCmd)}" class="px-3 py-1 rounded-xl text-[11px] font-bold bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-lg cursor-pointer transition-all active:scale-95 flex items-center gap-1.5"><i data-lucide="play" class="w-3.5 h-3.5 fill-current"></i> 🚀 Başlat</button>`);
-      }
-
-      actions.push(alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="addSkillFromScan(${i})" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer">Skill Ekle</button>`);
-      actions.push(alreadyMcp ? `<span class="text-[10px] text-gray-500">MCP ekli</span>` : `<button onclick="addMcpFromScan(${i})" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-cyan-600 hover:bg-cyan-500 text-white cursor-pointer">MCP Yapılandır</button>`);
-      if (entry.repo) actions.push(`<button onclick="pullRepo('${entry.name}')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-gray-700 text-gray-300 cursor-pointer">Güncelle (pull)</button>`);
-      actions.push(`<button onclick="deleteRepoFolder('${entry.name}')" class="px-2 py-1 rounded-lg text-[11px] font-semibold bg-red-600/80 hover:bg-red-500 text-white cursor-pointer">Klasörü Sil</button>`);
-
-      return `
-        <tr class="border-t border-gray-800/60 hover:bg-gray-900/40">
-          <td class="py-2.5 px-3 text-xs font-mono text-gray-200 align-middle">
-            <div class="font-bold text-gray-100">${escapeHtml(entry.name)}</div>
-            <div class="text-[10px] text-gray-500 truncate">${escapeHtml(entry.packageName || entry.path)}</div>
-          </td>
-          <td class="py-2.5 px-3 space-x-1 space-y-1 align-middle">${badges}</td>
-          <td class="py-2.5 px-3 space-x-1 space-y-1 align-middle">${installs.join('')}</td>
-          <td class="py-2.5 px-3 text-right space-x-2 space-y-1 align-middle">${actions.join('')}</td>
-        </tr>
-      `;
-    }).join('');
+  function primaryRuntimeBadge(entry) {
+    const rt = entry.runMode === 'docker' ? 'docker'
+      : (entry.runtimes || []).find(r => r !== 'docker') || (entry.runtimes || [])[0];
+    if (!rt) return '';
+    return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-gray-700/40 text-gray-300 border border-gray-600/40">${RUNTIME_BADGE[rt] || rt}</span>`;
   }
 
-  // Render Grid View
-  if (gridContainer) {
-    gridContainer.innerHTML = filtered.map((entry, i) => {
-      const runtimes = entry.runtimes || [];
-      const typeStyle = TYPE_BADGE_STYLE[entry.repoType] || TYPE_BADGE_STYLE.other;
+  function statusBadge(entry) {
+    if (entry.isRunning) {
+      const portTxt = entry.runningPort ? `Port: ${entry.runningPort}` : 'Aktif';
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">🟢 Çalışıyor (${portTxt})</span>`;
+    }
+    if (entry.hasStartError) {
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30" title="${escapeHtml(entry.startErrorMsg || '')}">⚠️ Çalıştırma Hatası</span>`;
+    }
+    if (entry.missingTool) {
+      return `<button onclick="goToSystemDiagnostics('${entry.missingTool}')" title="Sistem & Teşhis sayfasına git" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 cursor-pointer hover:bg-amber-500/25">⚠️ ${escapeHtml(entry.missingTool)} kurulu değil</button>`;
+    }
+    if (entry.isInstalled) {
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">✓ Hazır</span>`;
+    }
+    if (entry.runMode) {
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">⚠️ Kurulum Gerekli</span>`;
+    }
+    return '';
+  }
 
-      const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
-      const alreadyMcp = activeMcpServers.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+  function primaryActionButton(entry, extraClass) {
+    const runtimes = entry.runtimes || [];
+    const cls = `rounded-xl text-[11px] font-bold shadow-lg cursor-pointer transition-all active:scale-95 flex items-center justify-center gap-1.5 ${extraClass || 'px-3 py-1'}`;
+    if (entry.isRunning) {
+      return `<button onclick="killRunningApp('${entry.name}', this)" class="${cls} bg-red-600 hover:bg-red-500 text-white"><i data-lucide="square" class="w-3.5 h-3.5 fill-current"></i> Durdur</button>`;
+    }
+    if (entry.hasStartError) {
+      return `<button onclick="repairRepoProject('${entry.name}', ${JSON.stringify(runtimes).replace(/"/g, '&quot;')}, this)" title="Bağımlılıkları zorla yenile" class="${cls} bg-gradient-to-r from-amber-600 to-red-600 hover:from-amber-500 hover:to-red-500 text-white"><i data-lucide="wrench" class="w-3.5 h-3.5 fill-current"></i> Onar</button>`;
+    }
+    if (entry.missingTool) {
+      return `<button onclick="goToSystemDiagnostics('${entry.missingTool}')" title="Sistem & Teşhis sayfasından kurun" class="${cls} bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white"><i data-lucide="download" class="w-3.5 h-3.5"></i> ${escapeHtml(entry.missingTool)} Kurulu Değil</button>`;
+    }
+    if (entry.isInstalled) {
+      return `<button onclick="startRepoProject('${entry.name}', this)" title="Çalıştır: ${escapeHtml(entry.startCommand || '')}" class="${cls} bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white"><i data-lucide="play" class="w-3.5 h-3.5 fill-current"></i> Başlat</button>`;
+    }
+    if (entry.runMode === 'docker') {
+      return `<button onclick="dockerInstallAndRun('${entry.name}', this)" class="${cls} bg-gradient-to-r from-blue-700 to-cyan-700 hover:from-blue-600 hover:to-cyan-600 text-white"><i data-lucide="container" class="w-3.5 h-3.5"></i> Docker ile Kur & Başlat</button>`;
+    }
+    if (entry.runMode === 'local') {
+      return `<button onclick="installAndStart('${entry.name}', ${JSON.stringify(runtimes).replace(/"/g, '&quot;')}, this)" class="${cls} bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white"><i data-lucide="zap" class="w-3.5 h-3.5"></i> Kur & Başlat</button>`;
+    }
+    return '';
+  }
 
-      return `
-        <div class="glass-card flex flex-col justify-between space-y-3.5 relative overflow-hidden ${entry.isRunning ? 'border-emerald-500/50 bg-emerald-950/10' : ''}">
-          <div class="space-y-2">
-            <div class="flex items-start justify-between gap-2">
-              <div>
-                <h3 class="font-bold text-sm text-gray-100 truncate" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</h3>
-                <p class="text-[10px] text-gray-400 font-mono truncate">${escapeHtml(entry.packageName || entry.path)}</p>
-              </div>
-              <span class="text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${typeStyle}">${escapeHtml(entry.repoTypeLabel || '📁 Diğer')}</span>
+  function renderTableRow(entry, i) {
+    const typeStyle = TYPE_BADGE_STYLE[entry.repoType] || TYPE_BADGE_STYLE.other;
+    const typeBadge = `<span class="text-[10px] font-bold px-2 py-0.5 rounded border ${typeStyle}">${escapeHtml(entry.repoTypeLabel || '📁 Diğer')}</span>`;
+
+    const badges = [typeBadge, entry.gitStatus ? statusToBadge(entry.gitStatus) : '', primaryRuntimeBadge(entry)].filter(Boolean).join(' ');
+
+    const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+    const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+
+    const secondary = [];
+    if (entry.hasSkill) {
+      secondary.push(alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" title="Bu skill'i tespit edilen IDE'lere kopyalar" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer">Skill'i Etkinleştir</button>`);
+    }
+    if (entry.looksLikeMcp || matchedMcp) {
+      secondary.push(matchedMcp
+        ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" title="Değişkenlerini düzenle" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-500/20 cursor-pointer flex items-center gap-1"><i data-lucide="sliders-horizontal" class="w-3 h-3"></i> MCP ekli — Düzenle</button>`
+        : `<button onclick="addMcpFromScan(${i})" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-cyan-600 hover:bg-cyan-500 text-white cursor-pointer">MCP Yapılandır</button>`);
+    }
+    if (entry.repo) secondary.push(`<button onclick="pullRepo('${entry.name}')" title="Güncelle (git pull)" class="p-1.5 rounded-lg text-gray-400 hover:text-cyan-300 hover:bg-cyan-500/10 cursor-pointer"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>`);
+    secondary.push(`<button onclick="deleteRepoFolder('${entry.name}')" title="Klasörü sil" class="p-1.5 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>`);
+
+    return `
+      <tr class="border-t border-gray-800/60 hover:bg-gray-900/40">
+        <td class="py-2.5 px-3 text-xs font-mono text-gray-200 align-middle">
+          <div class="font-bold text-gray-100">${escapeHtml(entry.name)}</div>
+          <div class="text-[10px] text-gray-500 truncate">${escapeHtml(entry.packageName || entry.path)}</div>
+        </td>
+        <td class="py-2.5 px-3 space-x-1 space-y-1 align-middle">${badges}</td>
+        <td class="py-2.5 px-3 align-middle">${statusBadge(entry)}</td>
+        <td class="py-2.5 px-3 text-right align-middle">
+          <div class="flex items-center justify-end gap-1.5 flex-wrap">
+            ${primaryActionButton(entry)}
+            ${secondary.join('')}
+          </div>
+        </td>
+      </tr>
+    `;
+  }
+
+  function renderGridCard(entry, i) {
+    const typeStyle = TYPE_BADGE_STYLE[entry.repoType] || TYPE_BADGE_STYLE.other;
+    const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+    const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+
+    return `
+      <div class="glass-card flex flex-col justify-between space-y-3.5 relative overflow-hidden ${entry.isRunning ? 'border-emerald-500/50 bg-emerald-950/10' : ''}">
+        <div class="space-y-2">
+          <div class="flex items-start justify-between gap-2">
+            <div>
+              <h3 class="font-bold text-sm text-gray-100 truncate" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</h3>
+              <p class="text-[10px] text-gray-400 font-mono truncate">${escapeHtml(entry.packageName || entry.path)}</p>
             </div>
-
-            <div class="flex items-center gap-1.5 flex-wrap">
-              ${entry.isRunning ? `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">🟢 Çalışıyor (Port: ${entry.runningPort || 'Aktif'})</span>` : entry.isInstalled ? `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">✓ Bağımlılıklar Yüklü</span>` : `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">⚠️ Yükleme Gerekli</span>`}
-              ${runtimes.map(rt => `<span class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-gray-800 text-gray-300 border border-gray-700">${RUNTIME_BADGE[rt] || rt}</span>`).join('')}
-            </div>
+            <span class="text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${typeStyle}">${escapeHtml(entry.repoTypeLabel || '📁 Diğer')}</span>
           </div>
 
-          <div class="pt-2 border-t border-gray-800/80 space-y-2">
-            <div class="flex items-center gap-1.5 flex-wrap">
-              ${entry.isRunning ? `<button onclick="killRunningApp('${entry.name}', this)" class="flex-1 py-1.5 px-3 rounded-xl text-xs font-bold bg-red-600 hover:bg-red-500 text-white flex items-center justify-center gap-1 cursor-pointer"><i data-lucide="square" class="w-3.5 h-3.5 fill-current"></i> 🛑 Durdur</button>` : entry.hasStartError ? `<button onclick="repairRepoProject('${entry.name}', ${JSON.stringify(runtimes).replace(/"/g, '&quot;')}, this)" class="flex-1 py-1.5 px-3 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-600 to-red-600 hover:from-amber-500 text-white flex items-center justify-center gap-1 cursor-pointer"><i data-lucide="wrench" class="w-3.5 h-3.5 fill-current"></i> 🔧 Onar</button>` : (entry.isInstalled || entry.startCommand) ? `<button onclick="startRepoProject('${entry.name}', null, this)" class="flex-1 py-1.5 px-3 rounded-xl text-xs font-bold bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 text-white flex items-center justify-center gap-1 cursor-pointer"><i data-lucide="play" class="w-3.5 h-3.5 fill-current"></i> 🚀 Başlat</button>` : ''}
-              ${!entry.isInstalled && runtimes.includes('node') ? `<button onclick="runRepoAction('${entry.name}', 'npm-install', this)" class="py-1 px-2 rounded-lg text-[10px] font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Kur (npm)</button>` : ''}
-              ${!entry.isInstalled && runtimes.includes('python') ? `<button onclick="runRepoAction('${entry.name}', 'pip-install', this)" class="py-1 px-2 rounded-lg text-[10px] font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Kur (pip)</button>` : ''}
-            </div>
-
-            <div class="flex items-center justify-between text-[11px] pt-1">
-              ${alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="addSkillFromScan(${i})" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill Ekle</button>`}
-              ${alreadyMcp ? `<span class="text-[10px] text-gray-500">MCP ekli</span>` : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`}
-              <button onclick="deleteRepoFolder('${entry.name}')" class="text-red-400 hover:underline cursor-pointer">Sil</button>
-            </div>
+          <div class="flex items-center gap-1.5 flex-wrap">
+            ${statusBadge(entry)}
+            ${primaryRuntimeBadge(entry)}
           </div>
         </div>
-      `;
-    }).join('');
+
+        <div class="pt-2 border-t border-gray-800/80 space-y-2">
+          ${primaryActionButton(entry, 'w-full py-1.5 px-3 text-xs')}
+
+          <div class="flex items-center justify-between text-[11px] pt-1 flex-wrap gap-1.5">
+            ${entry.hasSkill ? (alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill Etkinleştir</button>`) : '<span></span>'}
+            ${(entry.looksLikeMcp || matchedMcp) ? (matchedMcp ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" class="text-cyan-400 hover:underline cursor-pointer font-semibold">MCP ekli — Düzenle</button>` : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`) : ''}
+            <button onclick="deleteRepoFolder('${entry.name}')" class="text-red-400 hover:underline cursor-pointer">Sil</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // Render Logic: Grouped or Flat
+  if (sortBy === 'grouped' || sortBy === 'type') {
+    let tableHtml = '';
+    let gridHtml = '';
+
+    GROUPS.forEach(grp => {
+      const grpItems = filtered.filter(e => {
+        if (grp.key === 'service') return e.repoType === 'service' || e.repoType === 'app';
+        if (grp.key === 'library') return e.repoType === 'library' || e.repoType === 'lib';
+        if (grp.key === 'other') return e.repoType === 'other' || (!e.repoType && e.repoType !== 'mcp' && e.repoType !== 'skill' && e.repoType !== 'service' && e.repoType !== 'app' && e.repoType !== 'library' && e.repoType !== 'lib');
+        return e.repoType === grp.key;
+      });
+
+      if (!grpItems.length) return;
+
+      // Sort items within group by name
+      grpItems.sort((a, b) => a.name.localeCompare(b.name));
+
+      tableHtml += `
+        <tr class="bg-gray-950/90 border-y border-gray-800">
+          <td colspan="4" class="py-2.5 px-3">
+            <div class="flex items-center gap-2 font-bold text-xs ${grp.color}">
+              <i data-lucide="${grp.icon}" class="w-4 h-4"></i> ${grp.title}
+              <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700">${grpItems.length}</span>
+            </div>
+          </td>
+        </tr>
+      ` + grpItems.map(entry => renderTableRow(entry, lastScanResults.indexOf(entry))).join('');
+
+      gridHtml += `
+        <div class="col-span-full pt-4 pb-2 border-b border-gray-800/80 flex items-center gap-2 font-bold text-xs ${grp.color}">
+          <i data-lucide="${grp.icon}" class="w-4 h-4"></i> ${grp.title}
+          <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700">${grpItems.length}</span>
+        </div>
+      ` + grpItems.map(entry => renderGridCard(entry, lastScanResults.indexOf(entry))).join('');
+    });
+
+    if (tbody) tbody.innerHTML = tableHtml;
+    if (gridContainer) gridContainer.innerHTML = gridHtml;
+  } else {
+    filtered.sort((a, b) => {
+      if (sortBy === 'name') return a.name.localeCompare(b.name);
+      if (sortBy === 'running') return (b.isRunning ? 1 : 0) - (a.isRunning ? 1 : 0);
+      if (sortBy === 'installed') return (b.isInstalled ? 1 : 0) - (a.isInstalled ? 1 : 0);
+      return 0;
+    });
+
+    if (tbody) tbody.innerHTML = filtered.map(entry => renderTableRow(entry, lastScanResults.indexOf(entry))).join('');
+    if (gridContainer) gridContainer.innerHTML = filtered.map(entry => renderGridCard(entry, lastScanResults.indexOf(entry))).join('');
   }
 
   if (window.lucide) lucide.createIcons();
@@ -1442,10 +1854,18 @@ function addMcpFromScan(index) {
     showToast(`'${entry.name}' zaten MCP panelinde ekli!`);
     return;
   }
-  const target = entry.packageName || entry.repo || entry.name;
+  // Prefer a real local invocation (node/python3 <abs path>, cwd=repo folder)
+  // derived by the backend scan over guessing an npm-registry package name —
+  // repo/<name> is a local clone, usually unpublished, so "npx -y <name>"
+  // mostly just 404s against the registry.
+  const hasLocalCmd = entry.runMode === 'local' && entry.localCommand && entry.localArgs && entry.localArgs.length;
+  const command = hasLocalCmd ? entry.localCommand : 'npx';
+  const args = hasLocalCmd ? entry.localArgs : ['-y', entry.packageName || entry.repo || entry.name];
   activeMcpServers.push({
-    id, name: entry.name, type: 'stdio', command: 'npx', args: ['-y', target], repo: entry.repo || undefined,
-    desc: `${entry.name} MCP sunucusu (repo/${entry.name} içinden tespit edildi — komutu kontrol edin).`,
+    id, name: entry.name, type: 'stdio', command, args, cwd: entry.path || undefined, repo: entry.repo || undefined,
+    desc: hasLocalCmd
+      ? `${entry.name} MCP sunucusu — repo/${entry.name} içinden yerel olarak çalıştırılır.`
+      : `${entry.name} MCP sunucusu (repo/${entry.name} içinden tespit edildi — komutu kontrol edin).`,
     category: 'Yerel Kütüphane', badge: 'Kütüphane', icon: 'folder-git-2', iconColor: 'text-indigo-400', auth: false
   });
   saveMcpServers(activeMcpServers);
@@ -1469,6 +1889,36 @@ async function pollLiveTasks() {
     if (appsRes.ok) activeRunningApps = await appsRes.json() || [];
     renderLiveTasksWidget();
   } catch (e) {}
+}
+
+async function stopLiveTask(id, btnEl) {
+  if (btnEl) btnEl.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Durdurulamadı');
+    showToast(data.message || '🛑 Görev durduruldu.');
+    pollLiveTasks();
+  } catch (e) {
+    showToast('⚠️ Görev durdurulamadı: ' + e.message);
+    if (btnEl) btnEl.disabled = false;
+  }
+}
+
+async function deleteLiveTask(id, btnEl) {
+  if (btnEl) btnEl.disabled = true;
+  activeTasksList = activeTasksList.filter(t => t.id !== id);
+  renderLiveTasksWidget();
+  try {
+    const res = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'Silinemedi');
+    }
+  } catch (e) {
+    showToast('⚠️ Görev silinemedi: ' + e.message);
+    pollLiveTasks();
+  }
 }
 
 async function killRunningApp(name, btnEl) {
@@ -1548,20 +1998,33 @@ function renderLiveTasksWidget() {
         `).join('')}
 
         ${runningTasks.map(t => `
-          <div class="p-2.5 rounded-xl bg-purple-950/50 border border-purple-500/30 text-[11px] space-y-1">
+          <div class="p-2.5 rounded-xl bg-purple-950/50 border border-purple-500/30 text-[11px] space-y-1.5">
             <div class="flex items-center justify-between font-semibold text-purple-200">
               <span class="truncate" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
               <span class="text-[9px] uppercase px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 animate-pulse">İşleniyor</span>
             </div>
             <p class="text-[10px] text-gray-400 leading-tight">${escapeHtml(t.message)}</p>
+            <div class="flex items-center justify-end gap-1.5 pt-1 border-t border-purple-800/40">
+              <button onclick="stopLiveTask('${t.id}', this)" class="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-red-600 hover:bg-red-500 text-white cursor-pointer flex items-center gap-1">
+                <i data-lucide="square" class="w-3 h-3 fill-current"></i> Durdur
+              </button>
+              <button onclick="deleteLiveTask('${t.id}', this)" title="Listeden sil" class="p-1 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer">
+                <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
           </div>
         `).join('')}
 
         ${recentCompleted.map(t => `
-          <div class="p-2.5 rounded-xl ${t.status === 'completed' ? 'bg-emerald-950/40 border border-emerald-500/30' : 'bg-red-950/40 border border-red-500/30'} text-[11px] space-y-1">
-            <div class="flex items-center justify-between font-semibold ${t.status === 'completed' ? 'text-emerald-200' : 'text-red-200'}">
+          <div class="p-2.5 rounded-xl ${t.status === 'completed' ? 'bg-emerald-950/40 border border-emerald-500/30' : t.status === 'cancelled' ? 'bg-gray-800/60 border border-gray-600/40' : 'bg-red-950/40 border border-red-500/30'} text-[11px] space-y-1">
+            <div class="flex items-center justify-between font-semibold ${t.status === 'completed' ? 'text-emerald-200' : t.status === 'cancelled' ? 'text-gray-300' : 'text-red-200'}">
               <span class="truncate" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
-              <span class="text-[9px] uppercase px-1.5 py-0.2 rounded ${t.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-red-500/20 text-red-300 border border-red-500/30'}">${t.status === 'completed' ? 'Tamamlandı' : 'Hata'}</span>
+              <div class="flex items-center gap-1 shrink-0">
+                <span class="text-[9px] uppercase px-1.5 py-0.2 rounded ${t.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : t.status === 'cancelled' ? 'bg-gray-600/30 text-gray-300 border border-gray-500/30' : 'bg-red-500/20 text-red-300 border border-red-500/30'}">${t.status === 'completed' ? 'Tamamlandı' : t.status === 'cancelled' ? 'Durduruldu' : 'Hata'}</span>
+                <button onclick="deleteLiveTask('${t.id}', this)" title="Listeden sil" class="p-0.5 rounded text-gray-500 hover:text-red-400 hover:bg-red-500/10 cursor-pointer">
+                  <i data-lucide="x" class="w-3 h-3"></i>
+                </button>
+              </div>
             </div>
             <p class="text-[10px] text-gray-400 leading-tight truncate">${escapeHtml(t.message)}</p>
           </div>
@@ -1963,13 +2426,18 @@ document.addEventListener('DOMContentLoaded', () => {
     try { performGithubSearch(cachedQuery); } catch (e) {}
   }
 
-  try { if (document.getElementById('library-scan-body')) loadLibraryScan(); } catch (e) {}
+  if (document.getElementById('library-scan-body')) {
+    try { loadLibraryScan(); } catch (e) {}
+  } else {
+    try { updateRepoCountBadge(); } catch (e) {}
+  }
   try { if (document.getElementById('loop-status-val')) initLoopEnginePage(); } catch (e) {}
   if (document.getElementById('activity-log-output')) {
     try { loadActivityLog(); } catch (e) {}
     setInterval(() => { try { loadActivityLog(); } catch (e) {} }, 30000);
   }
   try { if (document.getElementById('tracked-repos-body')) initSettingsPage(); } catch (e) {}
+  try { if (document.getElementById('marketplace-grid')) initMarketplacePage(); } catch (e) {}
 
   if (window.lucide) lucide.createIcons();
 
@@ -1983,10 +2451,312 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Backend bağlantısı — HER sayfada çalışır
   hydrateFromBackend();
+  try { loadMasterIdeInfo(); } catch (e) {}
   try { pollLiveTasks(); } catch (e) {}
 
   setInterval(hydrateFromBackend, 30000);
+  setInterval(() => { try { loadMasterIdeInfo(); } catch (e) {} }, 30000);
   try { setInterval(pollLiveTasks, 2000); } catch (e) {}
   window.addEventListener('focus', hydrateFromBackend);
+  window.addEventListener('focus', loadMasterIdeInfo);
   try { window.addEventListener('focus', pollLiveTasks); } catch (e) {}
 });
+
+// ---------- Master IDE Mirror Sync UI Logic ----------
+
+let currentMasterIdeData = null;
+
+async function loadMasterIdeInfo() {
+  try {
+    const res = await fetch(`${API_BASE}/api/ides/master`);
+    if (!res.ok) return;
+    const data = await res.json();
+    currentMasterIdeData = data;
+    renderMasterIdeUI(data);
+  } catch (e) {
+    console.warn('Master IDE bilgisi alınamadı:', e);
+  }
+}
+
+function renderMasterIdeUI(data) {
+  const masterSelects = document.querySelectorAll('.master-ide-select');
+  masterSelects.forEach(select => {
+    select.innerHTML = '';
+    if (data.allIdes && data.allIdes.length > 0) {
+      data.allIdes.forEach(ide => {
+        const id = ide.id || ide.ID;
+        const name = ide.name || ide.Name;
+        const isDetected = ide.detected !== undefined ? ide.detected : ide.Detected;
+        const opt = document.createElement('option');
+        opt.value = id;
+        opt.textContent = `${isDetected ? '✅' : '⚪'} ${name}`;
+        if (id === data.masterIde) opt.selected = true;
+        select.appendChild(opt);
+      });
+    }
+  });
+
+  const masterBadges = document.querySelectorAll('.master-ide-info-badge');
+  masterBadges.forEach(badge => {
+    const mName = data.master ? (data.master.name || data.master.Name) : data.masterIde;
+    badge.textContent = `👑 ${mName || 'Cursor IDE'} (${data.mcpCount || 0} MCP, ${data.skillsCount || 0} Skill)`;
+  });
+}
+
+async function changeMasterIde(newMasterId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/ides/master`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ masterIde: newMasterId })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Ana IDE değiştirilemedi');
+    showToast(`👑 Ana IDE değiştirildi: ${newMasterId}`);
+    loadMasterIdeInfo();
+  } catch (e) {
+    showToast('⚠️ Ana IDE değiştirme hatası: ' + e.message);
+  }
+}
+
+async function syncMasterIdeToAll(btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Aktarılıyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/ides/sync-master`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Master IDE aktarımı başarısız');
+    showToast(data.message || '✨ Master IDE ayarları diğer tüm IDE\'lere aktarıldı!');
+    loadMasterIdeInfo();
+    if (typeof loadIdePaths === 'function') loadIdePaths();
+  } catch (e) {
+    showToast('⚠️ Master IDE aktarım hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+// ---------- Visual Diff Modal Logic ----------
+
+async function openDiffModal() {
+  const modal = document.getElementById('diff-modal');
+  if (!modal) return;
+  modal.classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
+  await loadIdeDiff();
+}
+
+function closeDiffModal() {
+  const modal = document.getElementById('diff-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+async function loadIdeDiff() {
+  const container = document.getElementById('diff-results-container');
+  const masterNameEl = document.getElementById('diff-master-name');
+  if (!container) return;
+
+  container.innerHTML = '<div class="py-8 text-center text-gray-400"><i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto text-amber-400 mb-2"></i> Farklar hesaplanıyor...</div>';
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    const masterId = currentMasterIdeData ? currentMasterIdeData.masterIde : 'cursor';
+    const res = await fetch(`${API_BASE}/api/ides/diff?master=${masterId}`);
+    if (!res.ok) throw new Error('Diff verisi alınamadı');
+    const data = await res.json();
+
+    if (masterNameEl) masterNameEl.textContent = data.masterName || data.masterId;
+    renderDiffView(data);
+  } catch (e) {
+    container.innerHTML = `<div class="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs">⚠️ Diff hatası: ${e.message}</div>`;
+  }
+}
+
+function renderDiffView(data) {
+  const container = document.getElementById('diff-results-container');
+  if (!container) return;
+
+  if (!data.diffs || data.diffs.length === 0) {
+    container.innerHTML = '<div class="p-6 text-center text-gray-400 text-xs">Algılanan başka bir hedef IDE bulunamadı.</div>';
+    return;
+  }
+
+  let html = '';
+  data.diffs.forEach(diff => {
+    const addedMcpCount = diff.addedMcp ? diff.addedMcp.length : 0;
+    const removedMcpCount = diff.removedMcp ? diff.removedMcp.length : 0;
+    const addedSkillsCount = diff.addedSkills ? diff.addedSkills.length : 0;
+
+    html += `
+      <div class="p-3.5 rounded-xl bg-gray-900/60 border border-gray-800 space-y-2 text-xs">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="font-bold text-gray-200">${diff.targetName}</span>
+            <span class="text-[10px] text-gray-400 font-mono">(${diff.targetMcpCount || 0} MCP mevcut)</span>
+          </div>
+          <div class="flex items-center gap-1.5 text-[10px] font-bold">
+            ${addedMcpCount > 0 ? `<span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">+${addedMcpCount} MCP Eklenecek</span>` : ''}
+            ${addedSkillsCount > 0 ? `<span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">+${addedSkillsCount} Skill Eklenecek</span>` : ''}
+            ${addedMcpCount === 0 && addedSkillsCount === 0 ? '<span class="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300">✓ Tam Eşleşiyor</span>' : ''}
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
+          <div class="p-2.5 rounded-lg bg-gray-950/80 border border-gray-800/80 space-y-1">
+            <p class="font-semibold text-gray-300 text-[11px] flex items-center gap-1">
+              <i data-lucide="server" class="w-3 h-3 text-cyan-400"></i> MCP Sunucuları:
+            </p>
+            <div class="space-y-1 font-mono text-[11px]">
+              ${diff.addedMcp && diff.addedMcp.length > 0 ? diff.addedMcp.map(m => `<div class="text-emerald-400 flex items-center gap-1"><i data-lucide="plus" class="w-3 h-3"></i> ${m} <span class="text-[9px] text-emerald-500/80">(Master'dan aktarılacak)</span></div>`).join('') : ''}
+              ${diff.sameMcp && diff.sameMcp.length > 0 ? diff.sameMcp.map(m => `<div class="text-gray-400 flex items-center gap-1"><i data-lucide="check" class="w-3 h-3 text-indigo-400"></i> ${m} <span class="text-[9px] text-gray-500">(zaten eşleşiyor)</span></div>`).join('') : ''}
+              ${diff.removedMcp && diff.removedMcp.length > 0 ? diff.removedMcp.map(m => `<div class="text-red-400 flex items-center gap-1"><i data-lucide="minus" class="w-3 h-3"></i> ${m} <span class="text-[9px] text-red-500/80">(hedefte ekstra)</span></div>`).join('') : ''}
+            </div>
+          </div>
+
+          <div class="p-2.5 rounded-lg bg-gray-950/80 border border-gray-800/80 space-y-1">
+            <p class="font-semibold text-gray-300 text-[11px] flex items-center gap-1">
+              <i data-lucide="sparkles" class="w-3 h-3 text-amber-400"></i> Skill Paketleri:
+            </p>
+            <div class="space-y-1 font-mono text-[11px]">
+              ${diff.addedSkills && diff.addedSkills.length > 0 ? diff.addedSkills.map(s => `<div class="text-amber-300 flex items-center gap-1"><i data-lucide="plus" class="w-3 h-3"></i> ${s} <span class="text-[9px] text-amber-500/80">(kopyalanacak)</span></div>`).join('') : '<div class="text-gray-400 flex items-center gap-1"><i data-lucide="check" class="w-3 h-3 text-indigo-400"></i> Tüm skill\'ler eşleşiyor</div>'}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+
+  container.innerHTML = html;
+  if (window.lucide) lucide.createIcons();
+}
+
+// ---------- Marketplace Logic ----------
+
+let allMarketplaceItems = [];
+
+async function initMarketplacePage() {
+  await loadMarketplaceCatalog();
+}
+
+async function loadMarketplaceCatalog() {
+  const container = document.getElementById('marketplace-grid');
+  if (!container) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/marketplace/catalog`);
+    if (!res.ok) throw new Error('Marketplace verisi alınamadı');
+    allMarketplaceItems = await res.json();
+    filterMarketplaceItems();
+  } catch (e) {
+    container.innerHTML = `<div class="col-span-full p-6 text-center text-red-400 text-xs">⚠️ Marketplace yüklenemedi: ${e.message}</div>`;
+  }
+}
+
+function filterMarketplaceItems() {
+  const container = document.getElementById('marketplace-grid');
+  if (!container) return;
+
+  const searchInput = document.getElementById('marketplace-search-input');
+  const typeSelect = document.getElementById('marketplace-type-filter');
+
+  const query = searchInput ? searchInput.value.toLowerCase().trim() : '';
+  const typeFilter = typeSelect ? typeSelect.value : 'all';
+
+  const filtered = allMarketplaceItems.filter(item => {
+    const matchType = typeFilter === 'all' || item.type === typeFilter;
+    const matchQuery = !query || item.name.toLowerCase().includes(query) || item.repo.toLowerCase().includes(query) || item.desc.toLowerCase().includes(query);
+    return matchType && matchQuery;
+  });
+
+  renderMarketplaceCatalog(filtered);
+}
+
+function renderMarketplaceCatalog(items) {
+  const container = document.getElementById('marketplace-grid');
+  if (!container) return;
+
+  if (items.length === 0) {
+    container.innerHTML = '<div class="col-span-full py-12 text-center text-gray-400 text-xs">Aradığınız kriterlere uygun Marketplace paketi bulunamadı.</div>';
+    return;
+  }
+
+  let html = '';
+  items.forEach(item => {
+    const isMcp = item.type === 'mcp';
+    const typeBadge = isMcp ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30' : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+    const iconName = item.icon || (isMcp ? 'server' : 'sparkles');
+
+    html += `
+      <div class="p-4 rounded-2xl bg-gray-900/40 border border-gray-800 hover:border-amber-500/40 transition-all space-y-3 flex flex-col justify-between group">
+        <div class="space-y-2.5">
+          <div class="flex items-start justify-between gap-2">
+            <div class="flex items-center gap-2.5">
+              <div class="w-9 h-9 rounded-xl ${isMcp ? 'bg-cyan-500/20 text-cyan-300' : 'bg-amber-500/20 text-amber-300'} border border-gray-800 flex items-center justify-center font-bold text-sm">
+                <i data-lucide="${iconName}" class="w-4 h-4"></i>
+              </div>
+              <div>
+                <h3 class="font-bold text-xs text-gray-100 group-hover:text-amber-300 transition-colors">${item.name}</h3>
+                <p class="text-[10px] text-gray-400 font-mono">${item.repo}</p>
+              </div>
+            </div>
+            <span class="text-[9px] font-bold px-2 py-0.5 rounded-full border ${typeBadge}">${item.badge || item.type}</span>
+          </div>
+
+          <p class="text-xs text-gray-400 leading-relaxed">${item.desc}</p>
+        </div>
+
+        <div class="pt-2 border-t border-gray-800/80 flex items-center justify-between gap-2">
+          <span class="text-[10px] text-gray-400 flex items-center gap-1 font-semibold">
+            <i data-lucide="star" class="w-3 h-3 text-amber-400"></i> ${item.stars || '⭐ Popüler'}
+          </span>
+          <button onclick="installMarketplaceItem('${item.repo}', '${item.name}', this)" class="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 hover:bg-amber-500 text-amber-300 hover:text-gray-950 border border-amber-500/30 transition-all cursor-pointer flex items-center gap-1.5 active:scale-95 shadow-lg">
+            <i data-lucide="download" class="w-3.5 h-3.5"></i> 1-Tıkla Yükle & Aktar
+          </button>
+        </div>
+      </div>
+    `;
+  });
+
+  container.innerHTML = html;
+  if (window.lucide) lucide.createIcons();
+}
+
+async function installMarketplaceItem(repo, name, btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Kuruluyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/marketplace/install`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo, name })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Marketplace kurulumu başlatılamadı');
+
+    showToast(data.message || `🚀 '${name}' indiriliyor ve senkronize ediliyor...`);
+    if (typeof pollLiveTasks === 'function') pollLiveTasks();
+  } catch (e) {
+    showToast('⚠️ Marketplace kurulum hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+
