@@ -12,6 +12,7 @@
     <a href="https://github.com/imyigo/WyvDev/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.style=for-the-badge" alt="License"></a>
     <a href="https://github.com/imyigo/WyvDev"><img src="https://img.shields.io/badge/Status-Public%20Beta%20v0.9-orange?style=for-the-badge&logo=rocket" alt="Public Beta"></a>
     <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.22+-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go Version"></a>
+    <a href="#"><img src="https://img.shields.io/badge/Frontend-HTML5%20%7C%20CSS3%20%7C%20JS-E34F26?style=for-the-badge&logo=html5&logoColor=white" alt="Native Web UI"></a>
     <a href="#"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-blue?style=for-the-badge" alt="Platform"></a>
     <a href="#"><img src="https://img.shields.io/badge/i18n-English%20%7C%20Türkçe-purple?style=for-the-badge" alt="i18n"></a>
   </p>
@@ -21,6 +22,16 @@
 
 > [!IMPORTANT]
 > ⚠️ **WyvDev is currently in Public Beta (v0.9).** Active development is underway. Your feedback, bug reports, and pull requests are highly appreciated!
+
+---
+
+## 🏗️ Built Native for Every Desktop (Go + HTML/CSS/JS)
+
+WyvDev is engineered from the ground up to run **natively on any desktop OS (Windows, macOS, Linux)** with zero heavy framework bloat (No Electron, No heavy Node dependencies):
+
+* ⚡ **High-Performance Go Core:** Native OS process orchestration, TCP port sniffing, and atomic state synchronization compiled into a single lightweight binary (`wyvdev.exe` / `wyvdev`).
+* 🎨 **Ultra-Fast Native Web UI:** Crafted with clean **HTML5, Vanilla CSS3, and Modern JavaScript (ES6+)**, rendering instantaneously in any desktop web engine with glassmorphism design tokens.
+* 📦 **Zero-Dependency Single Executable:** Download and run instantly with zero installation overhead.
 
 ---
 
@@ -70,6 +81,7 @@ Scans your environment for required runtime tools and offers 1-click silent back
 
 | Feature | WyvDev | Manual Editing | Docker Compose | Generic Process Managers |
 | :--- | :---: | :---: | :---: | :---: |
+| **Native Architecture (Go + HTML/CSS/JS)** | ✅ **Yes (Zero Bloat)** | N/A | ❌ No | ❌ No |
 | **Multi-IDE Sync (13+ IDEs)** | ✅ **Yes** | ❌ No | ❌ No | ❌ No |
 | **Live TCP Port Auto-Discovery** | ✅ **Yes** | ❌ No | ⚠️ Port mapping only | ❌ No |
 | **Self-Healing Auto-Repair** | ✅ **Yes** | ❌ No | ❌ No | ❌ No |
