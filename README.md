@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 
   <h1>⚡ WyvDev</h1>
   <p><strong>The Open Source Local Developer PaaS & Universal MCP Orchestrator</strong></p>
@@ -98,19 +98,28 @@ Scans your environment for required runtime tools and offers 1-click silent back
 #### Option 1: Download Pre-built Binary
 Download the latest `wyvdev.exe` (or `wyvdev` binary) from the [Releases](https://github.com/imyigo/WyvDev/releases) page.
 
-#### Option 2: Build from Source
-Ensure you have [Go 1.22+](https://go.dev) installed:
+### How to Run on Any Operating System
 
-```bash
-# Clone the repository
-git clone https://github.com/imyigo/WyvDev.git
-cd WyvDev
+WyvDev ships with pre-compiled native binaries and 1-click launchers for all desktop platforms:
 
-# Build binary
-go build -o wyvdev.exe main.go
-
-# Run live server
+#### 🪟 Windows
+Double-click `launch-gui.bat` or run in Command Prompt / PowerShell:
+```cmd
 .\wyvdev.exe
+```
+
+#### 🍎 macOS (Intel & Apple Silicon M1/M2/M3/M4)
+Double-click `launch-gui.command` or run in Terminal:
+```bash
+chmod +x ./launch-gui.command
+./launch-gui.command
+```
+
+#### 🐧 Linux (Ubuntu, Debian, Arch, Fedora)
+Run in Terminal:
+```bash
+chmod +x ./launch-gui.sh
+./launch-gui.sh
 ```
 
 The Web UI automatically opens in your default browser at `http://127.0.0.1:47651/index.html`.

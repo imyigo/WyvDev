@@ -187,7 +187,7 @@ let activeIdePaths = loadIdePaths();
 // ---------- Go backend bridge ----------
 // ai-toolkit.exe serves this page itself (same-origin) once launched. If the
 // page is still opened via file:// (legacy), fall back to the fixed local port.
-const API_BASE = window.location.protocol === 'file:' ? 'http://127.0.0.1:47651' : '';
+const API_BASE = (window.location.origin && window.location.origin.includes('127.0.0.1:47651')) ? '' : 'http://127.0.0.1:47651';
 
 function setBackendStatus(online) {
   const pill = document.getElementById('backend-status-pill');
@@ -201,7 +201,7 @@ function setBackendStatus(online) {
   }
 }
 
-async function hydrateFromBackend() {
+async function hydrateFromBackend(retryCount = 0) {
   try {
     const res = await fetch(`${API_BASE}/api/state`);
     if (!res.ok) throw new Error('bad status');
@@ -232,7 +232,11 @@ async function hydrateFromBackend() {
 
     if (window.lucide) lucide.createIcons();
   } catch (e) {
-    setBackendStatus(false);
+    if (retryCount < 5) {
+      setTimeout(() => hydrateFromBackend(retryCount + 1), 400);
+    } else {
+      setBackendStatus(false);
+    }
   }
 }
 
