@@ -1651,7 +1651,7 @@ function renderLibraryScan() {
   // 1. Filter
   let filtered = [...lastScanResults];
   if (typeFilter !== 'all') {
-    filtered = filtered.filter(e => e.repoType === typeFilter);
+    filtered = filtered.filter(e => entryCapabilities(e).includes(typeFilter));
   }
 
   if (!filtered.length) {
@@ -1690,6 +1690,20 @@ function renderLibraryScan() {
     { key: 'library', title: '📦 Kütüphaneler', color: 'text-purple-400', icon: 'folder-git-2' },
     { key: 'other', title: '📁 Diğer Projeler', color: 'text-gray-400', icon: 'folder' }
   ];
+
+  // A repo can genuinely have more than one capability (e.g. it ships both
+  // an MCP server and a skill bundle) — return every one it has instead of
+  // the single best-guess RepoType, so it can show up under each relevant
+  // group with only that group's own actions instead of everything blended
+  // into one row.
+  function entryCapabilities(entry) {
+    const caps = [];
+    if (entry.looksLikeMcp) caps.push('mcp');
+    if (entry.hasSkill) caps.push('skill');
+    if (entry.runMode) caps.push('service');
+    if (!caps.length) caps.push(entry.hasPackageJson || (entry.runtimes || []).length ? 'library' : 'other');
+    return caps;
+  }
 
   function primaryRuntimeBadge(entry) {
     const rt = entry.runMode === 'docker' ? 'docker'
@@ -1742,7 +1756,11 @@ function renderLibraryScan() {
     return '';
   }
 
-  function renderTableRow(entry, i) {
+  // groupKey scopes which actions render: 'mcp' → config/test only (no
+  // Skill/Başlat), 'skill' → enable only, 'service' → run/install only.
+  // null (flat sort modes, where there's no group boundary) keeps the old
+  // blended behavior — every applicable action on one row.
+  function renderTableRow(entry, i, groupKey) {
     const typeStyle = TYPE_BADGE_STYLE[entry.repoType] || TYPE_BADGE_STYLE.other;
     const typeBadge = `<span class="text-[10px] font-bold px-2 py-0.5 rounded border ${typeStyle}">${escapeHtml(entry.repoTypeLabel || '📁 Diğer')}</span>`;
 
@@ -1751,11 +1769,15 @@ function renderLibraryScan() {
     const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
     const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
 
+    const showSkillAction = entry.hasSkill && (!groupKey || groupKey === 'skill');
+    const showMcpAction = (entry.looksLikeMcp || matchedMcp) && (!groupKey || groupKey === 'mcp');
+    const showPrimaryAction = !groupKey || groupKey === 'service';
+
     const secondary = [];
-    if (entry.hasSkill) {
+    if (showSkillAction) {
       secondary.push(alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" title="Bu skill'i tespit edilen IDE'lere kopyalar" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer">Skill'i Etkinleştir</button>`);
     }
-    if (entry.looksLikeMcp || matchedMcp) {
+    if (showMcpAction) {
       secondary.push(matchedMcp
         ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" title="Değişkenlerini düzenle" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-500/20 cursor-pointer flex items-center gap-1"><i data-lucide="sliders-horizontal" class="w-3 h-3"></i> MCP ekli — Düzenle</button>`
         : `<button onclick="addMcpFromScan(${i})" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-cyan-600 hover:bg-cyan-500 text-white cursor-pointer">MCP Yapılandır</button>`);
@@ -1776,7 +1798,7 @@ function renderLibraryScan() {
         <td class="py-2.5 px-3 align-middle">${statusBadge(entry)}</td>
         <td class="py-2.5 px-3 text-right align-middle">
           <div class="flex items-center justify-end gap-1.5 flex-wrap">
-            ${primaryActionButton(entry)}
+            ${showPrimaryAction ? primaryActionButton(entry) : ''}
             ${secondary.join('')}
           </div>
         </td>
@@ -1784,10 +1806,14 @@ function renderLibraryScan() {
     `;
   }
 
-  function renderGridCard(entry, i) {
+  function renderGridCard(entry, i, groupKey) {
     const typeStyle = TYPE_BADGE_STYLE[entry.repoType] || TYPE_BADGE_STYLE.other;
     const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
     const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+
+    const showSkillAction = entry.hasSkill && (!groupKey || groupKey === 'skill');
+    const showMcpAction = (entry.looksLikeMcp || matchedMcp) && (!groupKey || groupKey === 'mcp');
+    const showPrimaryAction = !groupKey || groupKey === 'service';
 
     return `
       <div class="glass-card flex flex-col justify-between space-y-3.5 relative overflow-hidden ${entry.isRunning ? 'border-emerald-500/50 bg-emerald-950/10' : ''}">
@@ -1807,12 +1833,12 @@ function renderLibraryScan() {
         </div>
 
         <div class="pt-2 border-t border-gray-800/80 space-y-2">
-          ${primaryActionButton(entry, 'w-full py-1.5 px-3 text-xs')}
+          ${showPrimaryAction ? primaryActionButton(entry, 'w-full py-1.5 px-3 text-xs') : ''}
 
           <div class="flex items-center justify-between text-[11px] pt-1 flex-wrap gap-1.5">
-            ${entry.hasSkill ? (alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill Etkinleştir</button>`) : '<span></span>'}
-            ${(entry.looksLikeMcp || matchedMcp) ? (matchedMcp ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" class="text-cyan-400 hover:underline cursor-pointer font-semibold">MCP ekli — Düzenle</button>` : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`) : ''}
-            ${matchedMcp ? `<button onclick="testMcpConnection('${matchedMcp.id}', this)" class="text-indigo-400 hover:underline cursor-pointer font-semibold">Test</button>` : ''}
+            ${showSkillAction ? (alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill Etkinleştir</button>`) : '<span></span>'}
+            ${showMcpAction ? (matchedMcp ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" class="text-cyan-400 hover:underline cursor-pointer font-semibold">MCP ekli — Düzenle</button>` : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`) : ''}
+            ${showMcpAction && matchedMcp ? `<button onclick="testMcpConnection('${matchedMcp.id}', this)" class="text-indigo-400 hover:underline cursor-pointer font-semibold">Test</button>` : ''}
             <button onclick="deleteRepoFolder('${entry.name}')" class="text-red-400 hover:underline cursor-pointer">Sil</button>
           </div>
         </div>
@@ -1826,12 +1852,7 @@ function renderLibraryScan() {
     let gridHtml = '';
 
     GROUPS.forEach(grp => {
-      const grpItems = filtered.filter(e => {
-        if (grp.key === 'service') return e.repoType === 'service' || e.repoType === 'app';
-        if (grp.key === 'library') return e.repoType === 'library' || e.repoType === 'lib';
-        if (grp.key === 'other') return e.repoType === 'other' || (!e.repoType && e.repoType !== 'mcp' && e.repoType !== 'skill' && e.repoType !== 'service' && e.repoType !== 'app' && e.repoType !== 'library' && e.repoType !== 'lib');
-        return e.repoType === grp.key;
-      });
+      const grpItems = filtered.filter(e => entryCapabilities(e).includes(grp.key));
 
       if (!grpItems.length) return;
 
@@ -1847,14 +1868,14 @@ function renderLibraryScan() {
             </div>
           </td>
         </tr>
-      ` + grpItems.map(entry => renderTableRow(entry, lastScanResults.indexOf(entry))).join('');
+      ` + grpItems.map(entry => renderTableRow(entry, lastScanResults.indexOf(entry), grp.key)).join('');
 
       gridHtml += `
         <div class="col-span-full pt-4 pb-2 border-b border-gray-800/80 flex items-center gap-2 font-bold text-xs ${grp.color}">
           <i data-lucide="${grp.icon}" class="w-4 h-4"></i> ${grp.title}
           <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700">${grpItems.length}</span>
         </div>
-      ` + grpItems.map(entry => renderGridCard(entry, lastScanResults.indexOf(entry))).join('');
+      ` + grpItems.map(entry => renderGridCard(entry, lastScanResults.indexOf(entry), grp.key)).join('');
     });
 
     if (tbody) tbody.innerHTML = tableHtml;
