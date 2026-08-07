@@ -644,6 +644,33 @@ function goToMcpConfig(id) {
   openMcpEditModal(id);
 }
 
+async function testMcpConnection(id, btnEl) {
+  const originalLabel = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i> Test ediliyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+  try {
+    const res = await fetch(`${API_BASE}/api/mcp/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Test başarısız');
+    showToast(data.ok ? (data.message || '✅ Bağlantı başarılı') : (data.message || '⚠️ Bağlantı başarısız'));
+  } catch (e) {
+    showToast('⚠️ Test hatası: ' + e.message);
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = originalLabel;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
 function openMcpEditModal(id) {
   const s = activeMcpServers.find(m => m.id === id);
   const modal = document.getElementById('mcp-edit-modal');
@@ -681,10 +708,11 @@ function openMcpEditModal(id) {
           </div>
         `;
       }).join('') : `<p class="text-[11px] text-gray-500">Henüz değişken eklenmedi — paket çalışma zamanında hata veriyorsa (ör. "Environment variable X is not defined"), o ismi aşağıya ekleyin.</p>`}
+      <div id="mcp-env-suggestions"></div>
       <div class="flex items-end gap-1.5 pt-2 border-t border-gray-800/60">
         <div class="flex-1 space-y-1">
           <label class="text-[9px] font-mono text-gray-400 block">Yeni değişken adı:</label>
-          <input id="mcp-new-var-key" type="text" placeholder="ör. DOKPLOY_URL" class="glass-input text-xs py-1 font-mono" />
+          <input id="mcp-new-var-key" type="text" placeholder="ör. API_KEY" class="glass-input text-xs py-1 font-mono" />
         </div>
         <div class="flex-1 space-y-1">
           <label class="text-[9px] font-mono text-gray-400 block">Değer:</label>
@@ -696,12 +724,48 @@ function openMcpEditModal(id) {
   `;
   modal.classList.remove('hidden');
   if (window.lucide) lucide.createIcons();
+
+  const repoName = repoNameFromCwd(s.cwd);
+  if (repoName) loadMcpEnvSuggestions(repoName, id);
 }
 
-function addMcpEnvVar(id) {
+// Repo-detected MCPs know their source folder (cwd) but not which env vars
+// the package actually reads — scan the repo's own source for env-read
+// idioms (process.env.X, os.getenv(), etc.) instead of making the user
+// guess names blind from a runtime crash message.
+function repoNameFromCwd(cwd) {
+  if (!cwd) return null;
+  const parts = cwd.split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
+async function loadMcpEnvSuggestions(repoName, mcpId) {
+  const el = document.getElementById('mcp-env-suggestions');
+  if (!el) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(repoName)}/env-vars`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const server = activeMcpServers.find(m => m.id === mcpId);
+    const existing = server && server.env ? Object.keys(server.env) : [];
+    const suggestions = (data.vars || []).filter(v => !existing.includes(v));
+    if (!suggestions.length) return;
+    el.innerHTML = `
+      <p class="text-[10px] text-gray-500 mt-1 mb-1">Kaynak kodda tespit edilen olası değişkenler (tıkla, eklensin):</p>
+      <div class="flex flex-wrap gap-1">
+        ${suggestions.map(v => `<button onclick="addMcpEnvVar('${mcpId}', '${v}')" class="px-2 py-0.5 rounded-md text-[10px] font-mono bg-indigo-900/40 hover:bg-indigo-800/60 text-indigo-300 border border-indigo-500/30 cursor-pointer">+ ${escapeHtml(v)}</button>`).join('')}
+      </div>
+    `;
+    if (window.lucide) lucide.createIcons();
+  } catch (e) {
+    // best-effort only — silently leave the manual-entry row as the fallback
+  }
+}
+
+function addMcpEnvVar(id, presetKey) {
   const keyInput = document.getElementById('mcp-new-var-key');
   const valueInput = document.getElementById('mcp-new-var-value');
-  const key = (keyInput?.value || '').trim();
+  const key = (presetKey || keyInput?.value || '').trim();
   if (!key) {
     showToast('⚠️ Değişken adı boş olamaz.');
     return;
@@ -709,7 +773,7 @@ function addMcpEnvVar(id) {
   const server = activeMcpServers.find(s => s.id === id);
   if (!server) return;
   if (!server.env) server.env = {};
-  server.env[key] = valueInput?.value || '';
+  server.env[key] = presetKey ? (server.env[key] || '') : (valueInput?.value || '');
   saveMcpServers(activeMcpServers);
   showToast(`'${key}' değişkeni eklendi.`);
   openMcpEditModal(id);
@@ -1601,6 +1665,13 @@ function renderLibraryScan() {
     node: '🟢 Node.js',
     python: '🐍 Python',
     rust: '🦀 Rust',
+    go: '🐹 Go',
+    ruby: '💎 Ruby',
+    php: '🐘 PHP',
+    java: '☕ Java',
+    dotnet: '🔷 .NET',
+    elixir: '💧 Elixir',
+    deno: '🦕 Deno',
     docker: '🐳 Docker'
   };
 
@@ -1688,6 +1759,9 @@ function renderLibraryScan() {
       secondary.push(matchedMcp
         ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" title="Değişkenlerini düzenle" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-500/20 cursor-pointer flex items-center gap-1"><i data-lucide="sliders-horizontal" class="w-3 h-3"></i> MCP ekli — Düzenle</button>`
         : `<button onclick="addMcpFromScan(${i})" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-cyan-600 hover:bg-cyan-500 text-white cursor-pointer">MCP Yapılandır</button>`);
+      if (matchedMcp) {
+        secondary.push(`<button onclick="testMcpConnection('${matchedMcp.id}', this)" title="Bağlantıyı test et" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-500/20 cursor-pointer flex items-center gap-1"><i data-lucide="plug-zap" class="w-3 h-3"></i> Test</button>`);
+      }
     }
     if (entry.repo) secondary.push(`<button onclick="pullRepo('${entry.name}')" title="Güncelle (git pull)" class="p-1.5 rounded-lg text-gray-400 hover:text-cyan-300 hover:bg-cyan-500/10 cursor-pointer"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>`);
     secondary.push(`<button onclick="deleteRepoFolder('${entry.name}')" title="Klasörü sil" class="p-1.5 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>`);
@@ -1738,6 +1812,7 @@ function renderLibraryScan() {
           <div class="flex items-center justify-between text-[11px] pt-1 flex-wrap gap-1.5">
             ${entry.hasSkill ? (alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill Etkinleştir</button>`) : '<span></span>'}
             ${(entry.looksLikeMcp || matchedMcp) ? (matchedMcp ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" class="text-cyan-400 hover:underline cursor-pointer font-semibold">MCP ekli — Düzenle</button>` : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`) : ''}
+            ${matchedMcp ? `<button onclick="testMcpConnection('${matchedMcp.id}', this)" class="text-indigo-400 hover:underline cursor-pointer font-semibold">Test</button>` : ''}
             <button onclick="deleteRepoFolder('${entry.name}')" class="text-red-400 hover:underline cursor-pointer">Sil</button>
           </div>
         </div>

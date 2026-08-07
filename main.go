@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -13,7 +14,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -533,6 +536,34 @@ func syncToIde(ide DetectedIde, template *McpConfigFile) (int, error) {
 		root["experimental"] = expMap
 	}
 
+	// VS Code's native MCP support (.vscode/mcp.json) does not read
+	// "mcpServers" at all — it expects a top-level "servers" map with an
+	// explicit "type": "stdio"|"http" per entry.
+	if ide.ID == "vscode-workspace" {
+		var vsServers map[string]interface{}
+		if existingVs, ok := root["servers"].(map[string]interface{}); ok && existingVs != nil {
+			vsServers = existingVs
+		} else {
+			vsServers = make(map[string]interface{})
+		}
+		for name, server := range template.McpServers {
+			if server.Type == "http" {
+				vsServers[name] = map[string]interface{}{
+					"type": "http",
+					"url":  server.URL,
+				}
+			} else {
+				vsServers[name] = map[string]interface{}{
+					"type":    "stdio",
+					"command": server.Command,
+					"args":    server.Args,
+					"env":     server.Env,
+				}
+			}
+		}
+		root["servers"] = vsServers
+	}
+
 	updatedData, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return 0, fmt.Errorf("JSON olusturma hatasi: %v", err)
@@ -605,6 +636,16 @@ func removeMcpIdsFromIde(ide DetectedIde, ids []string) {
 			expMap["modelContextProtocolServers"] = newContServers
 			root["experimental"] = expMap
 		}
+	}
+
+	if vsServers, ok := root["servers"].(map[string]interface{}); ok && vsServers != nil {
+		for _, id := range ids {
+			if _, ok := vsServers[id]; ok {
+				delete(vsServers, id)
+				changed = true
+			}
+		}
+		root["servers"] = vsServers
 	}
 
 	if !changed {
@@ -1491,6 +1532,220 @@ func executeMasterIdeMirrorSync(masterID string) (map[string]interface{}, error)
 	}, nil
 }
 
+// ---------- MCP Connection Test ----------
+
+func handleMcpTest(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.ID == "" {
+		writeErr(w, 400, "id alanı gerekli")
+		return
+	}
+
+	s, err := loadState()
+	if err != nil {
+		s = &StateBundle{}
+	}
+	var entry *MCPEntry
+	for i := range s.McpServers {
+		if s.McpServers[i].ID == body.ID {
+			entry = &s.McpServers[i]
+			break
+		}
+	}
+	if entry == nil {
+		writeErr(w, 404, "MCP bulunamadı: "+body.ID)
+		return
+	}
+
+	if entry.Type == "http" {
+		if entry.URL == "" {
+			writeJSON(w, 200, map[string]interface{}{"ok": false, "message": "⚠️ URL tanımlı değil"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+		defer cancel()
+		req, rErr := http.NewRequestWithContext(ctx, http.MethodGet, entry.URL, nil)
+		if rErr != nil {
+			writeJSON(w, 200, map[string]interface{}{"ok": false, "message": "⚠️ Geçersiz URL: " + rErr.Error()})
+			return
+		}
+		for k, v := range entry.Headers {
+			req.Header.Set(k, v)
+		}
+		resp, dErr := http.DefaultClient.Do(req)
+		if dErr != nil {
+			writeJSON(w, 200, map[string]interface{}{"ok": false, "message": "⚠️ Bağlantı hatası: " + dErr.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		writeJSON(w, 200, map[string]interface{}{
+			"ok":         true,
+			"statusCode": resp.StatusCode,
+			"message":    fmt.Sprintf("✅ Sunucuya ulaşıldı (HTTP %d)", resp.StatusCode),
+		})
+		return
+	}
+
+	if entry.Command == "" {
+		writeJSON(w, 200, map[string]interface{}{"ok": false, "message": "⚠️ Komut tanımlı değil"})
+		return
+	}
+
+	env := getEnhancedEnv()
+	resolved := resolveInEnv(entry.Command, env)
+	if resolved == "" {
+		writeJSON(w, 200, map[string]interface{}{"ok": false, "message": fmt.Sprintf("⚠️ Komut bulunamadı: %s (PATH içinde yok)", entry.Command)})
+		return
+	}
+
+	// Real MCP handshake: spawn the server and send an actual JSON-RPC
+	// "initialize" request over stdin, then wait for its response on stdout.
+	// A process merely *starting* proves nothing — many MCP servers exit
+	// immediately when a required token/env var is missing, which this
+	// would otherwise report as a false "success".
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, resolved, entry.Args...)
+	cmd.Env = env
+	if entry.Cwd != "" {
+		cmd.Dir = entry.Cwd
+	}
+	for k, v := range entry.Env {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	stdin, sErr := cmd.StdinPipe()
+	if sErr != nil {
+		writeJSON(w, 200, map[string]interface{}{"ok": false, "message": "⚠️ stdin açılamadı: " + sErr.Error()})
+		return
+	}
+	stdout, oErr := cmd.StdoutPipe()
+	if oErr != nil {
+		writeJSON(w, 200, map[string]interface{}{"ok": false, "message": "⚠️ stdout açılamadı: " + oErr.Error()})
+		return
+	}
+	stderrPipe, _ := cmd.StderrPipe()
+
+	if startErr := cmd.Start(); startErr != nil {
+		writeJSON(w, 200, map[string]interface{}{"ok": false, "message": "⚠️ Süreç başlatılamadı: " + startErr.Error()})
+		return
+	}
+
+	var stderrBuf strings.Builder
+	var stderrMux sync.Mutex
+	if stderrPipe != nil {
+		go func() {
+			sc := bufio.NewScanner(stderrPipe)
+			for sc.Scan() {
+				stderrMux.Lock()
+				if stderrBuf.Len() < 2000 {
+					stderrBuf.WriteString(sc.Text())
+					stderrBuf.WriteString("\n")
+				}
+				stderrMux.Unlock()
+			}
+		}()
+	}
+
+	initReq := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo":      map[string]interface{}{"name": "wyvdev", "version": "1.0"},
+		},
+	}
+	reqBytes, _ := json.Marshal(initReq)
+	_, _ = stdin.Write(append(reqBytes, '\n'))
+
+	type readResult struct {
+		line string
+		err  error
+	}
+	lineCh := make(chan readResult, 1)
+	go func() {
+		reader := bufio.NewReaderSize(stdout, 64*1024)
+		for {
+			line, rErr := reader.ReadString('\n')
+			if trimmed := strings.TrimSpace(line); trimmed != "" {
+				lineCh <- readResult{line: trimmed}
+				return
+			}
+			if rErr != nil {
+				lineCh <- readResult{err: rErr}
+				return
+			}
+		}
+	}()
+
+	stderrExcerpt := func() string {
+		stderrMux.Lock()
+		defer stderrMux.Unlock()
+		return strings.TrimSpace(stderrBuf.String())
+	}
+
+	var resultOk bool
+	var resultMsg string
+	select {
+	case res := <-lineCh:
+		if res.err != nil {
+			if detail := stderrExcerpt(); detail != "" {
+				resultMsg = "⚠️ Sunucu yanıt vermeden kapandı: " + truncateStr(detail, 300)
+			} else {
+				resultMsg = "⚠️ Sunucudan yanıt alınamadı (stdout kapandı)"
+			}
+		} else {
+			var parsed struct {
+				Result *struct {
+					ServerInfo *struct {
+						Name    string `json:"name"`
+						Version string `json:"version"`
+					} `json:"serverInfo"`
+				} `json:"result"`
+				Error *struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if jErr := json.Unmarshal([]byte(res.line), &parsed); jErr != nil {
+				resultMsg = "⚠️ Geçersiz JSON-RPC yanıtı: " + truncateStr(res.line, 200)
+			} else if parsed.Error != nil {
+				resultMsg = "⚠️ Sunucu hata döndü: " + parsed.Error.Message
+			} else if parsed.Result != nil {
+				resultOk = true
+				if parsed.Result.ServerInfo != nil && parsed.Result.ServerInfo.Name != "" {
+					resultMsg = fmt.Sprintf("✅ MCP handshake başarılı — %s v%s yanıt verdi", parsed.Result.ServerInfo.Name, parsed.Result.ServerInfo.Version)
+				} else {
+					resultMsg = "✅ MCP handshake başarılı — initialize yanıtı alındı"
+				}
+			} else {
+				resultMsg = "⚠️ Beklenmeyen yanıt: " + truncateStr(res.line, 200)
+			}
+		}
+	case <-ctx.Done():
+		if detail := stderrExcerpt(); detail != "" {
+			resultMsg = "⚠️ Zaman aşımı (8sn) — " + truncateStr(detail, 300)
+		} else {
+			resultMsg = "⚠️ Zaman aşımı (8sn) — sunucu initialize yanıtı vermedi"
+		}
+	}
+
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+
+	writeJSON(w, 200, map[string]interface{}{"ok": resultOk, "message": resultMsg})
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
 // ---------- Marketplace Handlers ----------
 
 type MarketplaceItem struct {
@@ -2050,6 +2305,13 @@ func gitRemoteRepo(dir string) string {
 // findSkillMd returns the path to this repo's SKILL.md, checking the root
 // first, then the skills/<name>/ and plugins/<name>/skills/<name>/ bundle
 // conventions — or "" if none of those shapes are present.
+// findSkillMd looks for SKILL.md only in shapes that mean "this repo IS a
+// distributable skill (bundle)": at the root, or nested under skills/,
+// plugins/*/skills/, packages/*/skills/, cli/assets/skills/. It deliberately
+// does NOT match .claude/skills/ (that's a repo's own internal Claude Code
+// tooling, not something it ships to other users) and does NOT walk the full
+// tree (a stray SKILL.md in docs/examples/vendored code anywhere in a large
+// repo would otherwise mislabel an unrelated project as a skill package).
 func findSkillMd(dir string) string {
 	if p := filepath.Join(dir, "SKILL.md"); fileExists(p) {
 		return p
@@ -2060,30 +2322,13 @@ func findSkillMd(dir string) string {
 	if matches, _ := filepath.Glob(filepath.Join(dir, "plugins", "*", "skills", "*", "SKILL.md")); len(matches) > 0 {
 		return matches[0]
 	}
-	if matches, _ := filepath.Glob(filepath.Join(dir, ".claude", "skills", "*", "SKILL.md")); len(matches) > 0 {
-		return matches[0]
-	}
 	if matches, _ := filepath.Glob(filepath.Join(dir, "packages", "*", "skills", "*", "SKILL.md")); len(matches) > 0 {
 		return matches[0]
 	}
 	if matches, _ := filepath.Glob(filepath.Join(dir, "cli", "assets", "skills", "*", "SKILL.md")); len(matches) > 0 {
 		return matches[0]
 	}
-	var found string
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || found != "" {
-			return nil
-		}
-		if !info.IsDir() && strings.EqualFold(info.Name(), "SKILL.md") {
-			found = path
-			return filepath.SkipAll
-		}
-		if info.IsDir() && (info.Name() == ".git" || info.Name() == "node_modules") {
-			return filepath.SkipDir
-		}
-		return nil
-	})
-	return found
+	return ""
 }
 
 func fileExists(p string) bool {
@@ -2332,13 +2577,13 @@ func scanRepoFolder(name string) ScanEntry {
 			if !hasMcpSdk {
 				_, hasMcpSdk = pkg.DevDependencies["@modelcontextprotocol/sdk"]
 			}
-			entry.LooksLikeMcp = hasMcpSdk || strings.Contains(haystack, "mcp") || strings.Contains(haystack, "dokploy")
+			entry.LooksLikeMcp = hasMcpSdk || strings.Contains(haystack, "mcp")
 		}
 	}
 
 	if !entry.LooksLikeMcp {
 		lowerName := strings.ToLower(name)
-		if strings.Contains(lowerName, "mcp") || strings.Contains(lowerName, "dokploy") {
+		if strings.Contains(lowerName, "mcp") {
 			entry.LooksLikeMcp = true
 		} else if _, err := os.Stat(filepath.Join(dir, "mcp.json")); err == nil {
 			entry.LooksLikeMcp = true
@@ -2359,6 +2604,35 @@ func scanRepoFolder(name string) ScanEntry {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
 		entry.Runtimes = append(entry.Runtimes, "rust")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		entry.Runtimes = append(entry.Runtimes, "go")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Gemfile")); err == nil {
+		entry.Runtimes = append(entry.Runtimes, "ruby")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "composer.json")); err == nil {
+		entry.Runtimes = append(entry.Runtimes, "php")
+	}
+	for _, marker := range []string{"pom.xml", "build.gradle", "build.gradle.kts"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			entry.Runtimes = append(entry.Runtimes, "java")
+			break
+		}
+	}
+	if matches, _ := filepath.Glob(filepath.Join(dir, "*.csproj")); len(matches) > 0 {
+		entry.Runtimes = append(entry.Runtimes, "dotnet")
+	} else if matches, _ := filepath.Glob(filepath.Join(dir, "*.sln")); len(matches) > 0 {
+		entry.Runtimes = append(entry.Runtimes, "dotnet")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "mix.exs")); err == nil {
+		entry.Runtimes = append(entry.Runtimes, "elixir")
+	}
+	for _, marker := range []string{"deno.json", "deno.jsonc"} {
+		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
+			entry.Runtimes = append(entry.Runtimes, "deno")
+			break
+		}
 	}
 	for _, marker := range []string{"Dockerfile", "dockerfile"} {
 		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
@@ -2410,7 +2684,7 @@ func scanRepoFolder(name string) ScanEntry {
 						entry.AvailableCmds = append(entry.AvailableCmds, cmd)
 					}
 
-					priorityScripts := []string{"dev", "dokploy:dev", "start", "serve", "preview", "watch", "build", "run", "cli"}
+					priorityScripts := []string{"dev", "start", "serve", "preview", "watch", "build", "run", "cli"}
 					for _, sName := range priorityScripts {
 						if _, ok := pkg.Scripts[sName]; ok {
 							if pkgManager == "pnpm" {
@@ -2537,6 +2811,41 @@ func scanRepoFolder(name string) ScanEntry {
 		if !commandExistsInEnv("docker", enhancedEnv) {
 			entry.MissingTool = "docker"
 		}
+	case containsRuntime(entry.Runtimes, "go"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("go", enhancedEnv) {
+			entry.MissingTool = "go"
+		}
+	case containsRuntime(entry.Runtimes, "ruby"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("ruby", enhancedEnv) {
+			entry.MissingTool = "ruby"
+		}
+	case containsRuntime(entry.Runtimes, "php"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("php", enhancedEnv) {
+			entry.MissingTool = "php"
+		}
+	case containsRuntime(entry.Runtimes, "java"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("java", enhancedEnv) {
+			entry.MissingTool = "java"
+		}
+	case containsRuntime(entry.Runtimes, "dotnet"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("dotnet", enhancedEnv) {
+			entry.MissingTool = "dotnet"
+		}
+	case containsRuntime(entry.Runtimes, "elixir"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("elixir", enhancedEnv) {
+			entry.MissingTool = "elixir"
+		}
+	case containsRuntime(entry.Runtimes, "deno"):
+		entry.RunMode = "local"
+		if !commandExistsInEnv("deno", enhancedEnv) {
+			entry.MissingTool = "deno"
+		}
 	}
 
 	repoStartErrorsMux.RLock()
@@ -2564,7 +2873,7 @@ func scanRepoFolder(name string) ScanEntry {
 	} else if entry.IsInstalled || entry.StartCommand != "" || containsRuntime(entry.Runtimes, "docker") {
 		entry.RepoType = "service"
 		entry.RepoTypeLabel = "⚡ Service / App"
-	} else if entry.HasPackageJson {
+	} else if entry.HasPackageJson || len(entry.Runtimes) > 0 {
 		entry.RepoType = "library"
 		entry.RepoTypeLabel = "📦 Library"
 	} else {
@@ -2594,6 +2903,112 @@ func containsRuntime(slice []string, val string) bool {
 		}
 	}
 	return false
+}
+
+// envVarPatterns cover the common "read an env var" idioms across the
+// languages this app already recognizes as a runtime (node/python/go/rust/
+// java/ruby/php) — language-agnostic by design, so a repo in any of these
+// stacks gets its required config discovered instead of the user having to
+// guess variable names from a runtime crash message.
+var envVarPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`process\.env\.([A-Z_][A-Z0-9_]*)`),
+	regexp.MustCompile(`process\.env\[['"]([A-Z_][A-Z0-9_]*)['"]\]`),
+	regexp.MustCompile(`os\.environ\[['"]([A-Z_][A-Z0-9_]*)['"]\]`),
+	regexp.MustCompile(`os\.environ\.get\(['"]([A-Z_][A-Z0-9_]*)['"]`),
+	regexp.MustCompile(`os\.getenv\(['"]([A-Z_][A-Z0-9_]*)['"]`),
+	regexp.MustCompile(`os\.Getenv\(['"]([A-Z_][A-Z0-9_]*)['"]\)`),
+	regexp.MustCompile(`os\.LookupEnv\(['"]([A-Z_][A-Z0-9_]*)['"]\)`),
+	regexp.MustCompile(`env::var\(['"]([A-Z_][A-Z0-9_]*)['"]\)`),
+	regexp.MustCompile(`System\.getenv\(['"]([A-Z_][A-Z0-9_]*)['"]\)`),
+	regexp.MustCompile(`ENV\[['"]([A-Z_][A-Z0-9_]*)['"]\]`),
+	regexp.MustCompile(`ENV\.fetch\(['"]([A-Z_][A-Z0-9_]*)['"]`),
+	regexp.MustCompile(`getenv\(['"]([A-Z_][A-Z0-9_]*)['"]\)`),
+	regexp.MustCompile(`\$_ENV\[['"]([A-Z_][A-Z0-9_]*)['"]\]`),
+}
+
+var envVarScanExtensions = map[string]bool{
+	".js": true, ".jsx": true, ".ts": true, ".tsx": true, ".mjs": true, ".cjs": true,
+	".py": true, ".go": true, ".rs": true, ".java": true, ".kt": true,
+	".rb": true, ".php": true, ".cs": true, ".ex": true, ".exs": true,
+}
+
+var envVarSkipDirs = map[string]bool{
+	".git": true, "node_modules": true, "dist": true, "build": true,
+	".venv": true, "venv": true, "target": true, "vendor": true,
+	".next": true, "out": true, "bin": true, "obj": true,
+}
+
+// Common vars that show up in almost every codebase but aren't something a
+// user needs to configure by hand for an MCP server.
+var envVarNoise = map[string]bool{
+	"NODE_ENV": true, "PATH": true, "HOME": true, "PWD": true, "SHELL": true,
+	"TERM": true, "LANG": true, "USER": true, "USERPROFILE": true,
+	"TEMP": true, "TMP": true, "TMPDIR": true, "CI": true,
+}
+
+// detectEnvVarNames scans a repo's source for env-var read patterns instead
+// of making the user guess from a runtime crash message. Bounded by file
+// count/size so it stays fast even on a large monorepo.
+func detectEnvVarNames(dir string) []string {
+	found := map[string]bool{}
+	filesScanned := 0
+	const maxFiles = 3000
+	const maxFileSize = 256 * 1024
+
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if filesScanned >= maxFiles {
+			return filepath.SkipAll
+		}
+		if info.IsDir() {
+			if envVarSkipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !envVarScanExtensions[strings.ToLower(filepath.Ext(info.Name()))] {
+			return nil
+		}
+		if info.Size() > maxFileSize {
+			return nil
+		}
+		data, rErr := os.ReadFile(path)
+		if rErr != nil {
+			return nil
+		}
+		filesScanned++
+		content := string(data)
+		for _, re := range envVarPatterns {
+			for _, m := range re.FindAllStringSubmatch(content, -1) {
+				if len(m) > 1 && !envVarNoise[m[1]] {
+					found[m[1]] = true
+				}
+			}
+		}
+		return nil
+	})
+
+	names := make([]string, 0, len(found))
+	for k := range found {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	if len(names) > 40 {
+		names = names[:40]
+	}
+	return names
+}
+
+func handleRepoEnvVars(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	dir := repoDir(name)
+	if _, err := os.Stat(dir); err != nil {
+		writeErr(w, 404, "yerel klasor yok")
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"vars": detectEnvVarNames(dir)})
 }
 
 func handleRepoStart(w http.ResponseWriter, r *http.Request) {
@@ -3109,7 +3524,7 @@ func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 			{"npx", "--version"},
 			{"npx.cmd", "--version"},
 		}},
-		{"pnpm", "pnpm Paket Yöneticisi", "JavaScript", "Monorepo projeleri (ör. dokploy) paket yönetimi", "npm i -g pnpm", [][]string{
+		{"pnpm", "pnpm Paket Yöneticisi", "JavaScript", "Monorepo projeleri için paket yönetimi", "npm i -g pnpm", [][]string{
 			{"pnpm", "--version"},
 			{"pnpm.cmd", "--version"},
 			{"npx", "pnpm", "--version"},
@@ -3135,6 +3550,28 @@ func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 		}},
 		{"docker", "Docker Engine & CLI", "Containers", "Konteynırlı MCP sunucuları ve Docker Build/Run", "https://docker.com", [][]string{
 			{"docker", "--version"},
+		}},
+		{"go", "Go Derleyici", "Go", "Go tabanlı MCP sunucuları ve servisleri", "https://go.dev/dl/", [][]string{
+			{"go", "version"},
+		}},
+		{"ruby", "Ruby Yorumlayıcısı", "Ruby", "Ruby tabanlı MCP sunucuları ve scriptleri", "https://www.ruby-lang.org/en/downloads/", [][]string{
+			{"ruby", "--version"},
+		}},
+		{"php", "PHP Yorumlayıcısı", "PHP", "PHP tabanlı MCP sunucuları ve scriptleri", "https://www.php.net/downloads", [][]string{
+			{"php", "--version"},
+		}},
+		{"java", "Java (JDK)", "Java", "Java/Kotlin tabanlı MCP sunucuları (Maven/Gradle)", "https://adoptium.net", [][]string{
+			{"java", "--version"},
+			{"java", "-version"},
+		}},
+		{"dotnet", ".NET SDK", ".NET", "C#/.NET tabanlı MCP sunucuları", "https://dotnet.microsoft.com/download", [][]string{
+			{"dotnet", "--version"},
+		}},
+		{"elixir", "Elixir Derleyici", "Elixir", "Elixir/Mix tabanlı MCP sunucuları", "https://elixir-lang.org/install.html", [][]string{
+			{"elixir", "--version"},
+		}},
+		{"deno", "Deno Runtime", "Deno", "Deno tabanlı MCP sunucuları ve scriptleri", "https://deno.com", [][]string{
+			{"deno", "--version"},
 		}},
 	}
 
@@ -3847,6 +4284,7 @@ func runServer() {
 	mux.HandleFunc("POST /api/state/migrate", handleStateMigrate)
 	mux.HandleFunc("GET /api/startup/status", handleStartupStatus)
 	mux.HandleFunc("GET /api/ides/detect", handleIdesDetect)
+	mux.HandleFunc("POST /api/mcp/test", handleMcpTest)
 	mux.HandleFunc("GET /api/marketplace/catalog", handleMarketplaceCatalog)
 	mux.HandleFunc("POST /api/marketplace/install", handleMarketplaceInstall)
 	mux.HandleFunc("POST /api/ides/backup", handleIdeBackup)
@@ -3858,6 +4296,7 @@ func runServer() {
 	mux.HandleFunc("POST /api/repos/{name}/enable-skill", handleRepoEnableSkill)
 	mux.HandleFunc("POST /api/skills/sync-all", handleSkillsSyncAll)
 	mux.HandleFunc("POST /api/repos/{name}/start", handleRepoStart)
+	mux.HandleFunc("GET /api/repos/{name}/env-vars", handleRepoEnvVars)
 	mux.HandleFunc("GET /api/repos/scan", handleReposScan)
 	mux.HandleFunc("POST /api/repos/check-all", handleCheckAllRepos)
 	mux.HandleFunc("GET /api/activity", handleActivity)
