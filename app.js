@@ -2550,6 +2550,15 @@ async function enableSkillToIdes(name, btnEl) {
 
 let libraryViewMode = localStorage.getItem('aitoolkit_library_view') || 'table';
 
+// Bulk selection state
+let _selectedRepos = new Set();
+
+// Debounced search
+const _debouncedLibrarySearch = (() => {
+  let t;
+  return () => { clearTimeout(t); t = setTimeout(() => renderLibraryScan(), 280); };
+})();
+
 function setLibraryViewMode(mode) {
   libraryViewMode = mode;
   localStorage.setItem('aitoolkit_library_view', mode);
@@ -2575,6 +2584,162 @@ function setLibraryViewMode(mode) {
   renderLibraryScan();
 }
 
+// Bulk selection helpers
+function toggleSelectAllRepos(chk) {
+  const checkboxes = document.querySelectorAll('.repo-row-check');
+  checkboxes.forEach(cb => {
+    cb.checked = chk.checked;
+    const name = cb.dataset.name;
+    if (chk.checked) _selectedRepos.add(name);
+    else _selectedRepos.delete(name);
+  });
+  updateBulkBar();
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulk-action-bar');
+  const label = document.getElementById('bulk-count-label');
+  if (!bar) return;
+  if (_selectedRepos.size > 0) {
+    bar.classList.remove('hidden');
+    bar.classList.add('flex');
+    if (label) label.textContent = `${_selectedRepos.size} seçildi`;
+  } else {
+    bar.classList.add('hidden');
+    bar.classList.remove('flex');
+    const selectAll = document.getElementById('select-all-repos');
+    if (selectAll) selectAll.checked = false;
+  }
+}
+
+function clearBulkSelection() {
+  _selectedRepos.clear();
+  document.querySelectorAll('.repo-row-check').forEach(cb => cb.checked = false);
+  const selectAll = document.getElementById('select-all-repos');
+  if (selectAll) selectAll.checked = false;
+  updateBulkBar();
+}
+
+async function bulkDeleteSelected() {
+  if (_selectedRepos.size === 0) return;
+  const names = [..._selectedRepos];
+  if (!confirm(`${names.length} repo silinecek. Geri alınamaz. Emin misiniz?`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/bulk-delete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names })
+    });
+    const data = await res.json();
+    showToast(`🗑 ${data.deleted?.length || 0} repo silindi.`);
+    _selectedRepos.clear();
+    await loadLibraryScan();
+  } catch (e) { showToast('❌ Silme hatası: ' + e.message); }
+}
+
+async function bulkPullSelected() {
+  if (_selectedRepos.size === 0) return;
+  const names = [..._selectedRepos];
+  const termEl = document.getElementById('aim-terminal');
+  // Use a simple toast flow for bulk pull
+  showToast(`🔄 ${names.length} repo güncelleniyor...`);
+  try {
+    const es = new EventSource(`${API_BASE}/api/repos/bulk-pull?` + new URLSearchParams({names: JSON.stringify(names)}));
+    // Fallback: POST approach
+    const res = await fetch(`${API_BASE}/api/repos/bulk-pull`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names })
+    });
+    // stream reading
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value);
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      lines.forEach(l => { if (l.startsWith('data: ')) showToast(l.slice(6)); });
+    }
+    clearBulkSelection();
+    await loadLibraryScan();
+  } catch (e) { showToast('❌ Güncelleme hatası: ' + e.message); }
+}
+
+// Toggle pin for a repo
+async function togglePin(name, btnEl) {
+  const entry = lastScanResults.find(e => e.name === name);
+  const newPinned = !(entry && entry.pinned);
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/meta`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: newPinned })
+    });
+    if (!res.ok) throw new Error('Kaydedilemedi');
+    if (entry) entry.pinned = newPinned;
+    showToast(newPinned ? `📌 '${name}' sabitlendi` : `📌 '${name}' sabiti kaldırıldı`);
+    if (btnEl) btnEl.title = newPinned ? 'Sabiti kaldır' : 'Sabitle';
+    if (btnEl) btnEl.textContent = newPinned ? '📌' : '📍';
+    await loadLibraryScan();
+  } catch (e) { showToast('❌ ' + e.message); }
+}
+
+// Save inline note for a repo
+async function saveRepoNote(name, text) {
+  try {
+    await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/meta`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: text })
+    });
+    const entry = lastScanResults.find(e => e.name === name);
+    if (entry) entry.note = text;
+  } catch (e) { showToast('❌ Not kaydedilemedi: ' + e.message); }
+}
+
+// Open folder in OS file explorer
+async function openRepoFolder(name) {
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(name)}/open-folder`, { method: 'POST' });
+    if (!res.ok) { const d = await res.json(); throw new Error(d.error); }
+  } catch (e) { showToast('❌ Klasör açılamadı: ' + e.message); }
+}
+
+// Inline rename — dblclick on repo name cell triggers this
+function startInlineRename(name, nameEl) {
+  const original = name;
+  const input = document.createElement('input');
+  input.value = name;
+  input.className = 'bg-gray-800 border border-indigo-500/50 rounded px-1.5 py-0.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 w-36';
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const commit = async () => {
+    const newName = input.value.trim();
+    if (!newName || newName === original) { input.replaceWith(nameEl); return; }
+    input.disabled = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(original)}/rename`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newName })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      showToast(`✅ '${original}' → '${newName}' olarak yeniden adlandırıldı`);
+      await loadLibraryScan();
+    } catch (e) {
+      showToast('❌ Yeniden adlandırılamadı: ' + e.message);
+      input.replaceWith(nameEl);
+    }
+  };
+
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    if (e.key === 'Escape') { input.replaceWith(nameEl); }
+  });
+}
+
 function renderLibraryScan() {
   const tbody = document.getElementById('library-scan-body');
   const gridContainer = document.getElementById('library-view-grid-wrapper');
@@ -2582,14 +2747,26 @@ function renderLibraryScan() {
 
   const typeFilter = document.getElementById('repo-type-filter')?.value || 'all';
   const sortBy = document.getElementById('repo-sort-by')?.value || 'grouped';
+  const searchQ = (document.getElementById('repo-search-input')?.value || '').toLowerCase().trim();
 
   SessionStore.set('repo_type_filter', typeFilter);
   SessionStore.set('repo_sort_by', sortBy);
 
-  // 1. Filter
+  // 1. Filter by type
   let filtered = [...lastScanResults];
   if (typeFilter !== 'all') {
     filtered = filtered.filter(e => entryCapabilities(e).includes(typeFilter));
+  }
+
+  // 2. Filter by search query
+  if (searchQ) {
+    filtered = filtered.filter(e =>
+      e.name.toLowerCase().includes(searchQ) ||
+      (e.packageName || '').toLowerCase().includes(searchQ) ||
+      (e.gitBranch || '').toLowerCase().includes(searchQ) ||
+      (e.runtimes || []).some(r => r.toLowerCase().includes(searchQ)) ||
+      (e.note || '').toLowerCase().includes(searchQ)
+    );
   }
 
   if (!filtered.length) {
@@ -2737,17 +2914,43 @@ function renderLibraryScan() {
     secondary.push(`<button onclick="deleteRepoFolder('${entry.name}')" title="Klasörü sil" class="p-1.5 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>`);
 
     return `
-      <tr class="border-t border-gray-800/60 hover:bg-gray-900/40">
-        <td class="py-2.5 px-3 text-xs font-mono text-gray-200 align-middle">
-          <div class="font-bold text-gray-100">${escapeHtml(entry.name)}</div>
-          <div class="text-[10px] text-gray-500 truncate">${escapeHtml(entry.packageName || entry.path)}</div>
+      <tr class="border-t border-gray-800/60 hover:bg-gray-900/40 ${entry.pinned ? 'bg-indigo-950/10' : ''}">
+        <td class="py-2.5 px-2 align-middle">
+          <input type="checkbox" class="repo-row-check cursor-pointer accent-indigo-500" data-name="${escapeHtml(entry.name)}"
+            onchange="_selectedRepos[this.checked?'add':'delete']('${escapeHtml(entry.name)}'); updateBulkBar()">
+        </td>
+        <td class="py-2.5 px-3 text-xs font-mono text-gray-200 align-middle max-w-[220px]">
+          <div class="flex items-center gap-1.5">
+            <button onclick="togglePin('${escapeHtml(entry.name)}', this)" title="${entry.pinned ? 'Sabiti kaldır' : 'Sabitle'}"
+              class="text-base leading-none hover:scale-125 transition-transform cursor-pointer shrink-0">${entry.pinned ? '📌' : '📍'}</button>
+            <div>
+              <div class="font-bold text-gray-100 cursor-pointer hover:text-indigo-300 transition-colors"
+                ondblclick="startInlineRename('${escapeHtml(entry.name)}', this)"
+                title="Çift tıkla yeniden adlandır">${escapeHtml(entry.name)}</div>
+              <div class="text-[10px] text-gray-500 truncate">${escapeHtml(entry.packageName || entry.path)}</div>
+              ${entry.note ? `<div class="text-[10px] text-indigo-300/70 truncate max-w-[180px]" title="${escapeHtml(entry.note)}">📝 ${escapeHtml(entry.note)}</div>` : ''}
+            </div>
+          </div>
         </td>
         <td class="py-2.5 px-3 space-x-1 space-y-1 align-middle">${badges}</td>
-        <td class="py-2.5 px-3 align-middle">${statusBadge(entry)}</td>
+        <td class="py-2.5 px-3 align-middle">
+          <div class="space-y-1">
+            ${statusBadge(entry)}
+            ${entry.gitBranch ? `<div class="flex items-center gap-1 text-[10px] text-gray-500">
+              <i data-lucide="git-branch" class="w-3 h-3 shrink-0"></i>
+              <span class="font-mono text-gray-400">${escapeHtml(entry.gitBranch)}</span>
+              ${entry.gitCommit ? `<span class="font-mono text-gray-600">${escapeHtml(entry.gitCommit)}</span>` : ''}
+            </div>` : ''}
+            ${entry.diskSizeMB > 0 ? `<div class="text-[10px] text-gray-600">💾 ${entry.diskSizeMB} MB</div>` : ''}
+          </div>
+        </td>
         <td class="py-2.5 px-3 text-right align-middle">
           <div class="flex items-center justify-end gap-1.5 flex-wrap">
             ${primaryBtn}
             ${secondary.join('')}
+            <button onclick="openRepoFolder('${escapeHtml(entry.name)}')" title="Klasörü Explorer'da Aç" class="p-1.5 rounded-lg text-gray-400 hover:text-amber-300 hover:bg-amber-500/10 cursor-pointer">
+              <i data-lucide="folder-open" class="w-3.5 h-3.5"></i>
+            </button>
           </div>
         </td>
       </tr>
@@ -2764,18 +2967,27 @@ function renderLibraryScan() {
     const isServiceGroup = groupKey === 'service' || groupKey === 'other' || !groupKey;
 
     return `
-      <div class="glass-card flex flex-col justify-between space-y-3.5 relative overflow-hidden ${entry.isRunning ? 'border-emerald-500/50 bg-emerald-950/10' : ''}">
+      <div class="glass-card flex flex-col justify-between space-y-3.5 relative overflow-hidden ${entry.isRunning ? 'border-emerald-500/50 bg-emerald-950/10' : ''} ${entry.pinned ? 'border-indigo-500/40 bg-indigo-950/10' : ''}">
         <div class="space-y-2">
           <div class="flex items-start justify-between gap-2">
-            <div>
-              <h3 class="font-bold text-sm text-gray-100 truncate" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</h3>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-1.5">
+                <button onclick="togglePin('${escapeHtml(entry.name)}', this)" title="${entry.pinned ? 'Sabiti kaldır' : 'Sabitle'}"
+                  class="text-sm shrink-0 hover:scale-125 transition-transform cursor-pointer">${entry.pinned ? '📌' : '📍'}</button>
+                <h3 class="font-bold text-sm text-gray-100 truncate cursor-pointer hover:text-indigo-300"
+                  ondblclick="startInlineRename('${escapeHtml(entry.name)}', this)"
+                  title="Çift tıkla yeniden adlandır | ${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</h3>
+              </div>
               <p class="text-[10px] text-gray-400 font-mono truncate">${escapeHtml(entry.packageName || entry.path)}</p>
+              ${entry.note ? `<p class="text-[10px] text-indigo-300/70 truncate" title="${escapeHtml(entry.note)}">📝 ${escapeHtml(entry.note)}</p>` : ''}
             </div>
             <span class="text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${typeStyle}">${escapeHtml(entry.repoTypeLabel || '📁 Diğer')}</span>
           </div>
           <div class="flex items-center gap-1.5 flex-wrap">
             ${statusBadge(entry)}
             ${primaryRuntimeBadge(entry)}
+            ${entry.gitBranch ? `<span class="text-[10px] font-mono text-gray-600 flex items-center gap-0.5"><i data-lucide="git-branch" class="w-2.5 h-2.5"></i>${escapeHtml(entry.gitBranch)}${entry.gitCommit ? ' · ' + escapeHtml(entry.gitCommit) : ''}</span>` : ''}
+            ${entry.diskSizeMB > 0 ? `<span class="text-[10px] text-gray-600">💾 ${entry.diskSizeMB}MB</span>` : ''}
           </div>
         </div>
 
@@ -2786,7 +2998,7 @@ function renderLibraryScan() {
             ${isSkillGroup
               ? (alreadySkill
                   ? `<span class="text-[10px] text-emerald-500 flex items-center gap-1"><i data-lucide="check-circle" class="w-3 h-3"></i> Skill ekli</span>`
-                  : `<button onclick="enableSkillToIdes('${entry.name}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill'i Etkinleştir</button>`)
+                  : `<button onclick="enableSkillToIdes('${escapeHtml(entry.name)}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill'i Etkinleştir</button>`)
               : ''}
             ${isMcpGroup
               ? (matchedMcp
@@ -2794,8 +3006,11 @@ function renderLibraryScan() {
                   : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`)
               : ''}
             ${isMcpGroup && matchedMcp ? `<button onclick="testMcpConnection('${matchedMcp.id}', this)" class="text-indigo-400 hover:underline cursor-pointer font-semibold">Test</button>` : ''}
-            ${entry.repo ? `<button onclick="pullRepo('${entry.name}')" title="git pull" class="text-gray-400 hover:text-cyan-300 cursor-pointer"><i data-lucide="refresh-cw" class="w-3 h-3"></i></button>` : ''}
-            <button onclick="deleteRepoFolder('${entry.name}')" class="text-red-400 hover:underline cursor-pointer">Sil</button>
+            <div class="flex items-center gap-1 ml-auto">
+              <button onclick="openRepoFolder('${escapeHtml(entry.name)}')" title="Klasörü Aç" class="text-gray-400 hover:text-amber-300 cursor-pointer"><i data-lucide="folder-open" class="w-3.5 h-3.5"></i></button>
+              ${entry.repo ? `<button onclick="pullRepo('${escapeHtml(entry.name)}')" title="git pull" class="text-gray-400 hover:text-cyan-300 cursor-pointer"><i data-lucide="refresh-cw" class="w-3 h-3"></i></button>` : ''}
+              <button onclick="deleteRepoFolder('${escapeHtml(entry.name)}')" class="text-red-400 hover:underline cursor-pointer text-[11px]">Sil</button>
+            </div>
           </div>
         </div>
       </div>
@@ -2812,12 +3027,15 @@ function renderLibraryScan() {
 
       if (!grpItems.length) return;
 
-      // Sort items within group by name
-      grpItems.sort((a, b) => a.name.localeCompare(b.name));
+      // Pinned float first, then alpha
+      grpItems.sort((a, b) => {
+        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
 
       tableHtml += `
         <tr class="bg-gray-950/90 border-y border-gray-800">
-          <td colspan="4" class="py-2.5 px-3">
+          <td colspan="5" class="py-2.5 px-3">
             <div class="flex items-center gap-2 font-bold text-xs ${grp.color}">
               <i data-lucide="${grp.icon}" class="w-4 h-4"></i> ${grp.title}
               <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-gray-800 text-gray-300 border border-gray-700">${grpItems.length}</span>
@@ -2841,6 +3059,9 @@ function renderLibraryScan() {
       if (sortBy === 'name') return a.name.localeCompare(b.name);
       if (sortBy === 'running') return (b.isRunning ? 1 : 0) - (a.isRunning ? 1 : 0);
       if (sortBy === 'installed') return (b.isInstalled ? 1 : 0) - (a.isInstalled ? 1 : 0);
+      if (sortBy === 'recent') return (b.lastModifiedAt || '').localeCompare(a.lastModifiedAt || '');
+      if (sortBy === 'size-desc') return (b.diskSizeMB || 0) - (a.diskSizeMB || 0);
+      if (sortBy === 'pinned') { if (a.pinned !== b.pinned) return a.pinned ? -1 : 1; return a.name.localeCompare(b.name); }
       return 0;
     });
 
@@ -2849,6 +3070,11 @@ function renderLibraryScan() {
   }
 
   if (window.lucide) lucide.createIcons();
+
+  // Re-apply checkbox states after re-render
+  document.querySelectorAll('.repo-row-check').forEach(cb => {
+    cb.checked = _selectedRepos.has(cb.dataset.name);
+  });
 }
 
 // Generic runner for repo/<name> — npm install, pip install, cargo build, docker build/run.

@@ -243,6 +243,8 @@ type ScanEntry struct {
 	Repo           string   `json:"repo,omitempty"`
 	Runtimes       []string `json:"runtimes,omitempty"` // "node", "python", "rust", "docker"
 	GitStatus      string   `json:"gitStatus,omitempty"`
+	GitBranch      string   `json:"gitBranch,omitempty"`  // current branch name
+	GitCommit      string   `json:"gitCommit,omitempty"`  // short commit hash
 	IsInstalled    bool     `json:"isInstalled"`
 	StartCommand   string   `json:"startCommand,omitempty"`
 	AvailableCmds  []string `json:"availableCmds,omitempty"`
@@ -253,11 +255,16 @@ type ScanEntry struct {
 	RunningPid     int      `json:"runningPid,omitempty"`
 	RepoType       string   `json:"repoType"`
 	RepoTypeLabel  string   `json:"repoTypeLabel"`
-	RunMode        string   `json:"runMode,omitempty"`      // "local" or "docker" — the one primary way to run this repo
-	MissingTool    string   `json:"missingTool,omitempty"`  // system tool RunMode needs but isn't installed (e.g. "docker")
-	LocalCommand   string   `json:"localCommand,omitempty"` // absolute-path command for a real (not npx-guessed) MCP stdio config
+	RunMode        string   `json:"runMode,omitempty"`      // "local" or "docker"
+	MissingTool    string   `json:"missingTool,omitempty"`
+	LocalCommand   string   `json:"localCommand,omitempty"`
 	LocalArgs      []string `json:"localArgs,omitempty"`
-	StartCommandGuessed bool `json:"startCommandGuessed,omitempty"` // true when StartCommand fell through to "pick any script" rather than matching a known launch-script name
+	StartCommandGuessed bool `json:"startCommandGuessed,omitempty"`
+	LastModifiedAt string   `json:"lastModifiedAt,omitempty"` // folder mtime RFC3339
+	DiskSizeMB     int      `json:"diskSizeMB,omitempty"`     // approximate disk usage
+	// Meta from state.json (pinned, note)
+	Pinned         bool     `json:"pinned,omitempty"`
+	Note           string   `json:"note,omitempty"`
 }
 
 type RunningApp struct {
@@ -312,15 +319,23 @@ func defaultAutoInstallConfig() AutoInstallConfig {
 	}
 }
 
+// RepoMeta holds user-specific metadata for a local repo/ folder.
+type RepoMeta struct {
+	Pinned   bool   `json:"pinned,omitempty"`
+	Note     string `json:"note,omitempty"`
+	PinnedAt string `json:"pinnedAt,omitempty"`
+}
+
 type StateBundle struct {
-	MasterIDE         string            `json:"masterIde,omitempty"`
-	McpServers        []MCPEntry        `json:"mcpServers"`
-	RecommendedRepos  []SkillEntry      `json:"recommendedRepos"`
-	IdePaths          []IdePathEntry    `json:"idePaths"`
-	TrackedRepos      []TrackedRepo     `json:"trackedRepos"`
-	DeletedIdeIDs     []string          `json:"deletedIdeIds,omitempty"`
-	LoopConfig        LoopEngineConfig  `json:"loopConfig,omitempty"`
-	AutoInstall       AutoInstallConfig `json:"autoInstall,omitempty"`
+	MasterIDE         string               `json:"masterIde,omitempty"`
+	McpServers        []MCPEntry           `json:"mcpServers"`
+	RecommendedRepos  []SkillEntry         `json:"recommendedRepos"`
+	IdePaths          []IdePathEntry       `json:"idePaths"`
+	TrackedRepos      []TrackedRepo        `json:"trackedRepos"`
+	DeletedIdeIDs     []string             `json:"deletedIdeIds,omitempty"`
+	LoopConfig        LoopEngineConfig     `json:"loopConfig,omitempty"`
+	AutoInstall       AutoInstallConfig    `json:"autoInstall,omitempty"`
+	RepoMeta          map[string]RepoMeta  `json:"repoMeta,omitempty"` // key = repo folder name
 }
 
 // ---------- Path helpers (AI_TOOLKIT_TEST_HOME lets tests point at a scratch dir) ----------
@@ -4584,9 +4599,13 @@ func handleReposScan(w http.ResponseWriter, r *http.Request) {
 
 	s, _ := loadState()
 	trackedMap := map[string]string{}
+	metaMap := map[string]RepoMeta{}
 	if s != nil {
 		for _, t := range s.TrackedRepos {
 			trackedMap[t.Name] = t.Status
+		}
+		if s.RepoMeta != nil {
+			metaMap = s.RepoMeta
 		}
 	}
 
@@ -4595,13 +4614,378 @@ func handleReposScan(w http.ResponseWriter, r *http.Request) {
 		if !de.IsDir() {
 			continue
 		}
-		entry := scanRepoFolder(de.Name())
-		if status, ok := trackedMap[de.Name()]; ok {
+		name := de.Name()
+		entry := scanRepoFolder(name)
+
+		// Git status from trackedMap
+		if status, ok := trackedMap[name]; ok {
 			entry.GitStatus = status
 		}
+
+		// Git branch & commit (fast, 2s timeout each)
+		dir := repoDir(name)
+		branchCtx, branchCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if brOut, brErr := exec.CommandContext(branchCtx, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD").Output(); brErr == nil {
+			entry.GitBranch = strings.TrimSpace(string(brOut))
+		}
+		branchCancel()
+
+		commitCtx, commitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		if cmOut, cmErr := exec.CommandContext(commitCtx, "git", "-C", dir, "rev-parse", "--short", "HEAD").Output(); cmErr == nil {
+			entry.GitCommit = strings.TrimSpace(string(cmOut))
+		}
+		commitCancel()
+
+		// Folder mtime
+		if fi, fiErr := os.Stat(dir); fiErr == nil {
+			entry.LastModifiedAt = fi.ModTime().Format(time.RFC3339)
+		}
+
+		// Disk size — fast walk, cap at 500ms
+		diskCtx, diskCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		var totalBytes int64
+		_ = filepath.WalkDir(dir, func(path string, d os.DirEntry, walkErr error) error {
+			if diskCtx.Err() != nil {
+				return filepath.SkipAll
+			}
+			if walkErr != nil || d.IsDir() {
+				return nil
+			}
+			// Skip .git internals for speed
+			if strings.Contains(path, string(os.PathSeparator)+".git"+string(os.PathSeparator)) {
+				return nil
+			}
+			if fi, e2 := d.Info(); e2 == nil {
+				totalBytes += fi.Size()
+			}
+			return nil
+		})
+		diskCancel()
+		entry.DiskSizeMB = int(totalBytes / (1024 * 1024))
+
+		// Pin / Note from meta
+		if meta, ok := metaMap[name]; ok {
+			entry.Pinned = meta.Pinned
+			entry.Note = meta.Note
+		}
+
 		results = append(results, entry)
 	}
+
+	// Sort: pinned repos float to top, then alphabetical
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Pinned != results[j].Pinned {
+			return results[i].Pinned
+		}
+		return results[i].Name < results[j].Name
+	})
+
 	writeJSON(w, 200, results)
+}
+
+// ── Repo Meta (pin + note) ───────────────────────────────────────────────────
+
+func handleRepoMeta(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+
+	stateFileMux.Lock()
+	defer stateFileMux.Unlock()
+	s, err := loadStateLocked()
+	if err != nil || s == nil {
+		s = &StateBundle{}
+	}
+	if s.RepoMeta == nil {
+		s.RepoMeta = map[string]RepoMeta{}
+	}
+
+	if r.Method == http.MethodGet {
+		meta := s.RepoMeta[name]
+		writeJSON(w, 200, map[string]interface{}{
+			"ok":     true,
+			"pinned": meta.Pinned,
+			"note":   meta.Note,
+		})
+		return
+	}
+
+	// POST — update pin and/or note
+	var body struct {
+		Pinned *bool   `json:"pinned"`
+		Note   *string `json:"note"`
+	}
+	if err2 := json.NewDecoder(r.Body).Decode(&body); err2 != nil {
+		writeErr(w, 400, "geçersiz JSON")
+		return
+	}
+
+	meta := s.RepoMeta[name]
+	if body.Pinned != nil {
+		meta.Pinned = *body.Pinned
+		if *body.Pinned {
+			meta.PinnedAt = time.Now().Format(time.RFC3339)
+		} else {
+			meta.PinnedAt = ""
+		}
+	}
+	if body.Note != nil {
+		meta.Note = *body.Note
+	}
+	s.RepoMeta[name] = meta
+	_ = saveState(s)
+	logActivity("repo-meta", fmt.Sprintf("%s → pinned=%v", name, meta.Pinned))
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "meta": meta})
+}
+
+// ── Repo Rename ──────────────────────────────────────────────────────────────
+
+func handleRepoRename(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	var body struct {
+		NewName string `json:"newName"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.NewName == "" {
+		writeErr(w, 400, "newName gerekli")
+		return
+	}
+	if err := safeRepoName(body.NewName); err != nil {
+		writeErr(w, 400, fmt.Sprintf("geçersiz yeni ad: %v", err))
+		return
+	}
+
+	oldDir := repoDir(name)
+	newDir := repoDir(body.NewName)
+
+	if _, err := os.Stat(newDir); err == nil {
+		writeErr(w, 409, fmt.Sprintf("'%s' adında zaten bir klasör var", body.NewName))
+		return
+	}
+	if err := os.Rename(oldDir, newDir); err != nil {
+		writeErr(w, 500, fmt.Sprintf("yeniden adlandırılamadı: %v", err))
+		return
+	}
+
+	// Update state.json references
+	if s, serr := loadState(); serr == nil {
+		for i, t := range s.TrackedRepos {
+			if t.Name == name {
+				s.TrackedRepos[i].Name = body.NewName
+				s.TrackedRepos[i].LocalPath = newDir
+			}
+		}
+		for i, sk := range s.RecommendedRepos {
+			if sk.ID == name || sk.Name == name {
+				s.RecommendedRepos[i].ID = body.NewName
+				s.RecommendedRepos[i].Name = body.NewName
+			}
+		}
+		for i, m := range s.McpServers {
+			if m.ID == name {
+				s.McpServers[i].ID = body.NewName
+			}
+		}
+		// Migrate RepoMeta key
+		if s.RepoMeta != nil {
+			if meta, ok := s.RepoMeta[name]; ok {
+				s.RepoMeta[body.NewName] = meta
+				delete(s.RepoMeta, name)
+			}
+		}
+		_ = saveState(s)
+	}
+
+	logActivity("repo-rename", fmt.Sprintf("%s → %s", name, body.NewName))
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "newName": body.NewName})
+}
+
+// ── Repo Open Folder ─────────────────────────────────────────────────────────
+
+func handleRepoOpenFolder(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	dir := repoDir(name)
+	if _, err := os.Stat(dir); err != nil {
+		writeErr(w, 404, "klasör bulunamadı")
+		return
+	}
+
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("explorer.exe", dir)
+	case "darwin":
+		cmd = exec.Command("open", dir)
+	default:
+		cmd = exec.Command("xdg-open", dir)
+	}
+	if err := cmd.Start(); err != nil {
+		writeErr(w, 500, fmt.Sprintf("klasör açılamadı: %v", err))
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{"ok": true, "path": dir})
+}
+
+// ── Bulk Delete ───────────────────────────────────────────────────────────────
+
+func handleRepoBulkDelete(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Names []string `json:"names"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Names) == 0 {
+		writeErr(w, 400, "names dizisi gerekli")
+		return
+	}
+
+	deleted := []string{}
+	failed := []map[string]string{}
+	for _, name := range body.Names {
+		if err := safeRepoName(name); err != nil {
+			failed = append(failed, map[string]string{"name": name, "error": err.Error()})
+			continue
+		}
+		dir := repoDir(name)
+		if err := os.RemoveAll(dir); err != nil {
+			failed = append(failed, map[string]string{"name": name, "error": err.Error()})
+			continue
+		}
+		deleted = append(deleted, name)
+	}
+
+	// Clean up state references for deleted repos
+	if len(deleted) > 0 {
+		if s, serr := loadState(); serr == nil {
+			deletedSet := map[string]bool{}
+			for _, n := range deleted {
+				deletedSet[n] = true
+			}
+			s.TrackedRepos = filterTrackedByName(s.TrackedRepos, deletedSet)
+			s.RecommendedRepos = filterSkillsByName(s.RecommendedRepos, deletedSet)
+			s.McpServers = filterMcpsByName(s.McpServers, deletedSet)
+			if s.RepoMeta != nil {
+				for _, n := range deleted {
+					delete(s.RepoMeta, n)
+				}
+			}
+			_ = saveState(s)
+		}
+	}
+
+	logActivity("repo-bulk-delete", fmt.Sprintf("%d silindi, %d başarısız", len(deleted), len(failed)))
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":      true,
+		"deleted": deleted,
+		"failed":  failed,
+	})
+}
+
+func filterTrackedByName(tr []TrackedRepo, del map[string]bool) []TrackedRepo {
+	out := []TrackedRepo{}
+	for _, t := range tr {
+		if !del[t.Name] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+func filterSkillsByName(sk []SkillEntry, del map[string]bool) []SkillEntry {
+	out := []SkillEntry{}
+	for _, s := range sk {
+		if !del[s.ID] && !del[s.Name] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+func filterMcpsByName(mcps []MCPEntry, del map[string]bool) []MCPEntry {
+	out := []MCPEntry{}
+	for _, m := range mcps {
+		if !del[m.ID] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ── Bulk Pull (SSE streaming) ─────────────────────────────────────────────────
+
+func handleRepoBulkPull(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Names []string `json:"names"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Names) == 0 {
+		writeErr(w, 400, "names dizisi gerekli")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, _ := w.(http.Flusher)
+
+	send := func(msg string) {
+		fmt.Fprintf(w, "data: %s\n\n", msg)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	type pullResult struct {
+		Name    string
+		Success bool
+		Output  string
+	}
+
+	results := make(chan pullResult, len(body.Names))
+	sem := make(chan struct{}, 4) // max 4 parallel pulls
+
+	for _, name := range body.Names {
+		go func(n string) {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if err := safeRepoName(n); err != nil {
+				results <- pullResult{Name: n, Success: false, Output: err.Error()}
+				return
+			}
+			dir := repoDir(n)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			out, err := exec.CommandContext(ctx, "git", "-C", dir, "pull", "--ff-only").CombinedOutput()
+			results <- pullResult{
+				Name:    n,
+				Success: err == nil,
+				Output:  strings.TrimSpace(string(out)),
+			}
+		}(name)
+	}
+
+	send(fmt.Sprintf("🔄 %d repo güncelleniyor...", len(body.Names)))
+	successCount, failCount := 0, 0
+	for i := 0; i < len(body.Names); i++ {
+		res := <-results
+		if res.Success {
+			successCount++
+			send(fmt.Sprintf("✅ %s — %s", res.Name, res.Output))
+		} else {
+			failCount++
+			send(fmt.Sprintf("❌ %s — %s", res.Name, res.Output))
+		}
+	}
+	send(fmt.Sprintf("\n📊 Tamamlandı: %d başarılı, %d başarısız", successCount, failCount))
+	fmt.Fprintf(w, "event: done\ndata: {\"success\":%d,\"failed\":%d}\n\n", successCount, failCount)
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 func handleCheckAllRepos(w http.ResponseWriter, r *http.Request) {
@@ -6231,11 +6615,17 @@ func runServer() {
 	mux.HandleFunc("GET /api/repos/{name}/env-vars", handleRepoEnvVars)
 	mux.HandleFunc("GET /api/repos/{name}/analyze", handleRepoAnalyze)
 	mux.HandleFunc("GET /api/repos/{name}/install/stream", handleRepoInstallStream)
+	mux.HandleFunc("GET /api/repos/{name}/meta", handleRepoMeta)
+	mux.HandleFunc("POST /api/repos/{name}/meta", handleRepoMeta)
+	mux.HandleFunc("POST /api/repos/{name}/rename", handleRepoRename)
+	mux.HandleFunc("POST /api/repos/{name}/open-folder", handleRepoOpenFolder)
 	mux.HandleFunc("GET /api/auto-install/config", handleAutoInstallConfig)
 	mux.HandleFunc("POST /api/auto-install/config", handleAutoInstallConfig)
 	mux.HandleFunc("POST /api/auto-install/scan", handleAutoInstallScan)
 	mux.HandleFunc("GET /api/repos/scan", handleReposScan)
 	mux.HandleFunc("POST /api/repos/check-all", handleCheckAllRepos)
+	mux.HandleFunc("POST /api/repos/bulk-delete", handleRepoBulkDelete)
+	mux.HandleFunc("POST /api/repos/bulk-pull", handleRepoBulkPull)
 	mux.HandleFunc("GET /api/activity", handleActivity)
 	mux.HandleFunc("GET /api/tasks", handleTasks)
 	mux.HandleFunc("POST /api/tasks/{id}/stop", handleTaskStop)
