@@ -4627,10 +4627,17 @@ func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 			{"npx", "--version"},
 			{"npx.cmd", "--version"},
 		}},
-		{"pnpm", "pnpm Paket Yöneticisi", "JavaScript", "Monorepo projeleri için paket yönetimi", "npm i -g pnpm", [][]string{
+		{"pnpm", "pnpm Paket Yöneticisi", "JavaScript", "Monorepo projeleri için paket yönetimi (workspace:*)", "npm i -g pnpm", [][]string{
 			{"pnpm", "--version"},
 			{"pnpm.cmd", "--version"},
 			{"npx", "pnpm", "--version"},
+		}},
+		{"yarn", "Yarn Paket Yöneticisi", "JavaScript", "Alternatif Node.js paket yöneticisi", "npm i -g yarn", [][]string{
+			{"yarn", "--version"},
+			{"yarn.cmd", "--version"},
+		}},
+		{"bun", "Bun Runtime & Paket Yöneticisi", "JavaScript", "Ultra hızlı JS runtime ve paket yöneticisi", "https://bun.sh", [][]string{
+			{"bun", "--version"},
 		}},
 		{"python", "Python 3 Motoru", "Python", "Python tabanlı MCP sunucuları ve scriptleri", "https://python.org", [][]string{
 			{"python", "--version"},
@@ -4651,30 +4658,42 @@ func handleSystemHealth(w http.ResponseWriter, r *http.Request) {
 			{"cargo", "--version"},
 			{"rustc", "--version"},
 		}},
-		{"docker", "Docker Engine & CLI", "Containers", "Konteynırlı MCP sunucuları ve Docker Build/Run", "https://docker.com", [][]string{
+		{"docker", "Docker Engine & CLI", "Containers", "Konteynırlı MCP sunucuları ve Docker Build/Run", "https://docs.docker.com/engine/install/", [][]string{
 			{"docker", "--version"},
 		}},
 		{"go", "Go Derleyici", "Go", "Go tabanlı MCP sunucuları ve servisleri", "https://go.dev/dl/", [][]string{
 			{"go", "version"},
 		}},
-		{"ruby", "Ruby Yorumlayıcısı", "Ruby", "Ruby tabanlı MCP sunucuları ve scriptleri", "https://www.ruby-lang.org/en/downloads/", [][]string{
-			{"ruby", "--version"},
-		}},
 		{"php", "PHP Yorumlayıcısı", "PHP", "PHP tabanlı MCP sunucuları ve scriptleri", "https://www.php.net/downloads", [][]string{
 			{"php", "--version"},
+		}},
+		{"composer", "PHP Composer", "PHP", "PHP projeleri için bağımlılık yöneticisi", "https://getcomposer.org", [][]string{
+			{"composer", "--version"},
 		}},
 		{"java", "Java (JDK)", "Java", "Java/Kotlin tabanlı MCP sunucuları (Maven/Gradle)", "https://adoptium.net", [][]string{
 			{"java", "--version"},
 			{"java", "-version"},
 		}},
+		{"mvn", "Apache Maven", "Java", "Java projeleri için build ve bağımlılık yönetimi", "https://maven.apache.org", [][]string{
+			{"mvn", "--version"},
+		}},
+		{"gradle", "Gradle Build", "Java", "Kotlin/Android/Java projeleri için build aracı", "https://gradle.org", [][]string{
+			{"gradle", "--version"},
+		}},
+		{"ruby", "Ruby Yorumlayıcısı", "Ruby", "Ruby tabanlı MCP sunucuları ve scriptleri", "https://www.ruby-lang.org", [][]string{
+			{"ruby", "--version"},
+		}},
 		{"dotnet", ".NET SDK", ".NET", "C#/.NET tabanlı MCP sunucuları", "https://dotnet.microsoft.com/download", [][]string{
 			{"dotnet", "--version"},
+		}},
+		{"deno", "Deno Runtime", "Deno", "Deno tabanlı MCP sunucuları ve scriptleri", "https://deno.com", [][]string{
+			{"deno", "--version"},
 		}},
 		{"elixir", "Elixir Derleyici", "Elixir", "Elixir/Mix tabanlı MCP sunucuları", "https://elixir-lang.org/install.html", [][]string{
 			{"elixir", "--version"},
 		}},
-		{"deno", "Deno Runtime", "Deno", "Deno tabanlı MCP sunucuları ve scriptleri", "https://deno.com", [][]string{
-			{"deno", "--version"},
+		{"make", "GNU Make", "Build Tools", "Makefile tabanlı build ve kurulum sistemleri", "https://gnuwin32.sourceforge.net/packages/make.htm", [][]string{
+			{"make", "--version"},
 		}},
 	}
 
@@ -4720,39 +4739,108 @@ func buildInstallCmds() map[string]installCmdDef {
 	switch runtime.GOOS {
 	case "darwin":
 		return map[string]installCmdDef{
-			"pipx":   {"pipx", "python3", []string{"-m", "pip", "install", "--user", "pipx", "--break-system-packages"}},
-			"uvx":    {"uv / uvx", "python3", []string{"-m", "pip", "install", "uv", "--break-system-packages"}},
-			"pnpm":   {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
-			"npx":    {"npm/npx", "npm", []string{"install", "-g", "npm"}},
-			"git":    {"Git", "brew", []string{"install", "git"}},
-			"node":   {"Node.js", "brew", []string{"install", "node"}},
-			"python": {"Python 3", "brew", []string{"install", "python@3.12"}},
-			"cargo":  {"Rust / Cargo", "brew", []string{"install", "rust"}},
-			"docker": {"Docker Desktop", "brew", []string{"install", "--cask", "docker"}},
+			// Python ecosystem
+			"pipx":    {"pipx", "python3", []string{"-m", "pip", "install", "--user", "pipx", "--break-system-packages"}},
+			"uvx":     {"uv / uvx", "python3", []string{"-m", "pip", "install", "uv", "--break-system-packages"}},
+			// Node.js ecosystem
+			"pnpm":    {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
+			"yarn":    {"Yarn", "npm", []string{"install", "-g", "yarn"}},
+			"bun":     {"Bun", "bash", []string{"-c", "curl -fsSL https://bun.sh/install | bash"}},
+			"npx":     {"npm/npx", "npm", []string{"install", "-g", "npm"}},
+			// Core runtimes via Homebrew
+			"git":     {"Git", "brew", []string{"install", "git"}},
+			"node":    {"Node.js", "brew", []string{"install", "node"}},
+			"python":  {"Python 3", "brew", []string{"install", "python@3.12"}},
+			"cargo":   {"Rust / Cargo", "brew", []string{"install", "rust"}},
+			"go":      {"Go", "brew", []string{"install", "go"}},
+			"docker":  {"Docker Engine", "brew", []string{"install", "docker"}},
+			// PHP ecosystem
+			"php":     {"PHP", "brew", []string{"install", "php"}},
+			"composer":{"PHP Composer", "bash", []string{"-c", "curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/local/bin/composer"}},
+			// Java ecosystem
+			"java":    {"JDK (Temurin)", "brew", []string{"install", "--cask", "temurin"}},
+			"mvn":     {"Maven", "brew", []string{"install", "maven"}},
+			"gradle":  {"Gradle", "brew", []string{"install", "gradle"}},
+			// Ruby
+			"ruby":    {"Ruby", "brew", []string{"install", "ruby"}},
+			// .NET
+			"dotnet":  {".NET SDK", "brew", []string{"install", "--cask", "dotnet"}},
+			// Deno
+			"deno":    {"Deno", "brew", []string{"install", "deno"}},
+			// Elixir
+			"elixir":  {"Elixir", "brew", []string{"install", "elixir"}},
+			// Build tools
+			"make":    {"GNU Make", "brew", []string{"install", "make"}},
 		}
 	case "windows":
 		return map[string]installCmdDef{
-			"pipx":   {"pipx", "python", []string{"-m", "pip", "install", "--user", "pipx"}},
-			"uvx":    {"uv / uvx", "python", []string{"-m", "pip", "install", "uv"}},
-			"pnpm":   {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
-			"npx":    {"npm/npx", "npm", []string{"install", "-g", "npm"}},
-			"git":    {"Git", "winget", []string{"install", "--id", "Git.Git", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-			"node":   {"Node.js", "winget", []string{"install", "--id", "OpenJS.NodeJS.LTS", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-			"python": {"Python 3", "winget", []string{"install", "--id", "Python.Python.3.12", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-			"cargo":  {"Rustup", "winget", []string{"install", "--id", "Rustlang.Rustup", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
-			"docker": {"Docker Desktop", "winget", []string{"install", "--id", "Docker.DockerDesktop", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// Python ecosystem
+			"pipx":    {"pipx", "python", []string{"-m", "pip", "install", "--user", "pipx"}},
+			"uvx":     {"uv / uvx", "winget", []string{"install", "--id", "astral-sh.uv", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// Node.js ecosystem
+			"pnpm":    {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
+			"yarn":    {"Yarn", "npm", []string{"install", "-g", "yarn"}},
+			"bun":     {"Bun", "powershell", []string{"-c", "irm bun.sh/install.ps1 | iex"}},
+			"npx":     {"npm/npx", "npm", []string{"install", "-g", "npm"}},
+			// Core runtimes via winget
+			"git":     {"Git", "winget", []string{"install", "--id", "Git.Git", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"node":    {"Node.js", "winget", []string{"install", "--id", "OpenJS.NodeJS.LTS", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"python":  {"Python 3", "winget", []string{"install", "--id", "Python.Python.3.12", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"cargo":   {"Rustup", "winget", []string{"install", "--id", "Rustlang.Rustup", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"go":      {"Go", "winget", []string{"install", "--id", "GoLang.Go", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"docker":  {"Docker Engine (CLI)", "winget", []string{"install", "--id", "Docker.DockerCLI", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// PHP ecosystem
+			"php":     {"PHP", "winget", []string{"install", "--id", "PHP.PHP", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"composer":{"PHP Composer", "winget", []string{"install", "--id", "Composer.Composer", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// Java ecosystem
+			"java":    {"JDK (Temurin 21)", "winget", []string{"install", "--id", "EclipseAdoptium.Temurin.21.JDK", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"mvn":     {"Maven", "winget", []string{"install", "--id", "Apache.Maven", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			"gradle":  {"Gradle", "winget", []string{"install", "--id", "Gradle.Gradle", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// Ruby
+			"ruby":    {"Ruby", "winget", []string{"install", "--id", "RubyInstallerTeam.RubyWithDevKit.3.3", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// .NET
+			"dotnet":  {".NET SDK", "winget", []string{"install", "--id", "Microsoft.DotNet.SDK.8", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// Deno
+			"deno":    {"Deno", "winget", []string{"install", "--id", "DenoLand.Deno", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// Elixir
+			"elixir":  {"Elixir", "winget", []string{"install", "--id", "Elixir.Elixir", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
+			// Build tools
+			"make":    {"GNU Make", "winget", []string{"install", "--id", "GnuWin32.Make", "-e", "--source", "winget", "--accept-package-agreements", "--accept-source-agreements"}},
 		}
-	default: // linux (best-effort)
+	default: // linux (apt-get best-effort — usually needs sudo)
 		return map[string]installCmdDef{
-			"pipx":   {"pipx", "python3", []string{"-m", "pip", "install", "--user", "pipx"}},
-			"uvx":    {"uv / uvx", "python3", []string{"-m", "pip", "install", "uv"}},
-			"pnpm":   {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
-			"npx":    {"npm/npx", "npm", []string{"install", "-g", "npm"}},
-			"git":    {"Git", "apt-get", []string{"install", "-y", "git"}},
-			"node":   {"Node.js", "apt-get", []string{"install", "-y", "nodejs", "npm"}},
-			"python": {"Python 3", "apt-get", []string{"install", "-y", "python3", "python3-pip"}},
-			"cargo":  {"Rust / Cargo", "apt-get", []string{"install", "-y", "cargo"}},
-			"docker": {"Docker Engine", "apt-get", []string{"install", "-y", "docker.io"}},
+			// Python ecosystem
+			"pipx":    {"pipx", "python3", []string{"-m", "pip", "install", "--user", "pipx"}},
+			"uvx":     {"uv / uvx", "bash", []string{"-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"}},
+			// Node.js ecosystem
+			"pnpm":    {"pnpm", "npm", []string{"install", "-g", "pnpm"}},
+			"yarn":    {"Yarn", "npm", []string{"install", "-g", "yarn"}},
+			"bun":     {"Bun", "bash", []string{"-c", "curl -fsSL https://bun.sh/install | bash"}},
+			"npx":     {"npm/npx", "npm", []string{"install", "-g", "npm"}},
+			// Core runtimes via apt-get
+			"git":     {"Git", "apt-get", []string{"install", "-y", "git"}},
+			"node":    {"Node.js", "apt-get", []string{"install", "-y", "nodejs", "npm"}},
+			"python":  {"Python 3", "apt-get", []string{"install", "-y", "python3", "python3-pip"}},
+			"cargo":   {"Rust / Cargo", "apt-get", []string{"install", "-y", "cargo"}},
+			"go":      {"Go", "apt-get", []string{"install", "-y", "golang"}},
+			"docker":  {"Docker Engine", "apt-get", []string{"install", "-y", "docker.io"}},
+			// PHP ecosystem
+			"php":     {"PHP", "apt-get", []string{"install", "-y", "php", "php-cli"}},
+			"composer":{"PHP Composer", "bash", []string{"-c", "curl -sS https://getcomposer.org/installer | php && mv composer.phar /usr/local/bin/composer"}},
+			// Java ecosystem
+			"java":    {"JDK (Temurin)", "apt-get", []string{"install", "-y", "default-jdk"}},
+			"mvn":     {"Maven", "apt-get", []string{"install", "-y", "maven"}},
+			"gradle":  {"Gradle", "apt-get", []string{"install", "-y", "gradle"}},
+			// Ruby
+			"ruby":    {"Ruby", "apt-get", []string{"install", "-y", "ruby", "ruby-bundler"}},
+			// .NET
+			"dotnet":  {".NET SDK", "apt-get", []string{"install", "-y", "dotnet-sdk-8.0"}},
+			// Deno
+			"deno":    {"Deno", "bash", []string{"-c", "curl -fsSL https://deno.land/install.sh | sh"}},
+			// Elixir
+			"elixir":  {"Elixir", "apt-get", []string{"install", "-y", "elixir"}},
+			// Build tools
+			"make":    {"GNU Make", "apt-get", []string{"install", "-y", "build-essential"}},
 		}
 	}
 }
