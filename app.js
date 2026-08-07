@@ -1936,12 +1936,17 @@ function addMcpFromScan(index) {
   const hasLocalCmd = entry.runMode === 'local' && entry.localCommand && entry.localArgs && entry.localArgs.length;
   const command = hasLocalCmd ? entry.localCommand : 'npx';
   const args = hasLocalCmd ? entry.localArgs : ['-y', entry.packageName || entry.repo || entry.name];
+  let desc;
+  if (!hasLocalCmd) {
+    desc = `${entry.name} MCP sunucusu (repo/${entry.name} içinden tespit edildi — komutu kontrol edin).`;
+  } else if (entry.startCommandGuessed) {
+    desc = `${entry.name} MCP sunucusu — repo/${entry.name} için bilinen bir başlatma script'i (dev/start/serve) bulunamadı, "${command} ${args.join(' ')}" rastgele bir script'ten tahmin edildi. Gerçekten bir MCP sunucusu başlatmayabilir — kontrol edin.`;
+  } else {
+    desc = `${entry.name} MCP sunucusu — repo/${entry.name} içinden yerel olarak çalıştırılır.`;
+  }
   activeMcpServers.push({
     id, name: entry.name, type: 'stdio', command, args, cwd: entry.path || undefined, repo: entry.repo || undefined,
-    desc: hasLocalCmd
-      ? `${entry.name} MCP sunucusu — repo/${entry.name} içinden yerel olarak çalıştırılır.`
-      : `${entry.name} MCP sunucusu (repo/${entry.name} içinden tespit edildi — komutu kontrol edin).`,
-    category: 'Yerel Kütüphane', badge: 'Kütüphane', icon: 'folder-git-2', iconColor: 'text-indigo-400', auth: false
+    desc, category: 'Yerel Kütüphane', badge: 'Kütüphane', icon: 'folder-git-2', iconColor: 'text-indigo-400', auth: false
   });
   saveMcpServers(activeMcpServers);
   renderMcps();

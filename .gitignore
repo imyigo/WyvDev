@@ -1,6 +1,7 @@
 # Local server state (contains API keys typed into the panel — never commit)
 core/state.json
 core/activity.log
+core/backups/
 
 # Cloned/tracked repos (machine-local)
 repo/*

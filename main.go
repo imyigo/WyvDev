@@ -257,6 +257,7 @@ type ScanEntry struct {
 	MissingTool    string   `json:"missingTool,omitempty"`  // system tool RunMode needs but isn't installed (e.g. "docker")
 	LocalCommand   string   `json:"localCommand,omitempty"` // absolute-path command for a real (not npx-guessed) MCP stdio config
 	LocalArgs      []string `json:"localArgs,omitempty"`
+	StartCommandGuessed bool `json:"startCommandGuessed,omitempty"` // true when StartCommand fell through to "pick any script" rather than matching a known launch-script name
 }
 
 type RunningApp struct {
@@ -819,7 +820,19 @@ func handleActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, reversed)
 }
 
+// stateFileMux serializes every read-modify-write cycle against state.json.
+// Without it, the 1s background sync ticker and an HTTP handler's own
+// loadState→mutate→saveState sequence can interleave and clobber each
+// other's write.
+var stateFileMux sync.Mutex
+
 func loadState() (*StateBundle, error) {
+	stateFileMux.Lock()
+	defer stateFileMux.Unlock()
+	return loadStateLocked()
+}
+
+func loadStateLocked() (*StateBundle, error) {
 	data, err := os.ReadFile(statePath())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -883,6 +896,9 @@ func reconcileState(s *StateBundle) []string {
 }
 
 func saveState(s *StateBundle) error {
+	stateFileMux.Lock()
+	defer stateFileMux.Unlock()
+
 	if err := os.MkdirAll(filepath.Join(getBaseDir(), "core"), 0755); err != nil {
 		return err
 	}
@@ -890,13 +906,41 @@ func saveState(s *StateBundle) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(statePath(), data, 0644)
+
+	// Write-then-rename instead of a direct write: os.Rename is atomic on
+	// both Windows and POSIX, so a reader never observes a half-written
+	// file — the one place state.json actually got corrupted this session
+	// was a race between this write and a concurrent read.
+	target := statePath()
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, target)
 }
 
 // ---------- git tracking ----------
 
 func repoDir(name string) string {
 	return filepath.Join(getBaseDir(), "repo", name)
+}
+
+// safeRepoName rejects anything that isn't a plain folder-name segment
+// before it reaches repoDir(). Without this, a {name} path value of ".."
+// (a single path segment is legal there) collapses filepath.Join(base,
+// "repo", "..") back to base itself — turning handleRepoDelete's
+// os.RemoveAll into a wipe of the app's own base directory.
+func safeRepoName(name string) error {
+	if name == "" {
+		return fmt.Errorf("repo adi bos olamaz")
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("gecersiz repo adi")
+	}
+	if filepath.Clean(name) != name {
+		return fmt.Errorf("gecersiz repo adi")
+	}
+	return nil
 }
 
 func autoCloneMissingRepos(s *StateBundle) []map[string]interface{} {
@@ -1109,6 +1153,18 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		// without that field — preserve whatever is already on disk instead of wiping it.
 		if len(incoming.TrackedRepos) == 0 && loadErr == nil {
 			incoming.TrackedRepos = previous.TrackedRepos
+		}
+
+		// A save that wipes every configured MCP server (the "Varsayılan
+		// Ayarlara Sıfırla" button, or any future bulk-clear action) is the
+		// one state change with no built-in undo. Snapshot what's about to
+		// be lost so it's recoverable from disk instead of gone for good.
+		if loadErr == nil && len(previous.McpServers) > 0 && len(incoming.McpServers) == 0 {
+			backupDir := filepath.Join(getBaseDir(), "core", "backups")
+			if mkErr := os.MkdirAll(backupDir, 0755); mkErr == nil {
+				backupPath := filepath.Join(backupDir, fmt.Sprintf("state-%s.json", time.Now().Format("20060102-150405")))
+				_ = copyFile(statePath(), backupPath)
+			}
 		}
 
 		if err := saveState(&incoming); err != nil {
@@ -1929,6 +1985,10 @@ func handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
 
 func handleRepoCheck(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	status, err := gitCheck(r.Context(), name)
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -1951,6 +2011,10 @@ func handleRepoCheck(w http.ResponseWriter, r *http.Request) {
 
 func handleRepoPull(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	dir := repoDir(name)
 	if _, err := os.Stat(dir); err != nil {
 		writeErr(w, 404, "yerel klasor yok")
@@ -1966,8 +2030,8 @@ func handleRepoPull(w http.ResponseWriter, r *http.Request) {
 
 func handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if name == "" {
-		writeErr(w, 400, "repo adi belirtilmedi")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
 		return
 	}
 
@@ -2072,6 +2136,10 @@ func sanitizeDockerTag(name string) string {
 
 func handleRepoRun(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	dir := repoDir(name)
 	if _, err := os.Stat(dir); err != nil {
 		writeErr(w, 404, "yerel klasor yok")
@@ -2158,6 +2226,10 @@ func handleRepoRun(w http.ResponseWriter, r *http.Request) {
 // instead of leaving "enable this skill" as a manual copy the user has to do.
 func handleRepoEnableSkill(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	copiedCount, results, err := enableSkillForRepo(name)
 	if err != nil {
 		writeErr(w, 400, err.Error())
@@ -2476,6 +2548,7 @@ var (
 	syncStateMux      sync.Mutex
 	lastSyncStateHash string
 	fullSyncCompleted bool
+	lastSyncedMcpIds  map[string]bool
 )
 
 func computeSyncStateHash() string {
@@ -2516,6 +2589,27 @@ func runBackgroundSyncController() {
 			s, err := loadState()
 			if err == nil && s != nil {
 				syncAllIdes(s.McpServers)
+
+				// syncAllIdes only ever adds/updates keys — it never deletes
+				// one, so an MCP entry removed from state.json outside the
+				// normal HTTP flow (hand-edited, or by a future code path
+				// that forgets to diff) would otherwise sit there forever,
+				// resurrected on every tick. Diff against what this loop
+				// itself last pushed and explicitly prune the difference.
+				currentIds := map[string]bool{}
+				for _, m := range s.McpServers {
+					currentIds[m.ID] = true
+				}
+				if lastSyncedMcpIds != nil {
+					var goneIds []string
+					for id := range lastSyncedMcpIds {
+						if !currentIds[id] {
+							goneIds = append(goneIds, id)
+						}
+					}
+					removeMcpIdsFromAllIdes(goneIds)
+				}
+				lastSyncedMcpIds = currentIds
 			}
 
 			_, _ = syncSkillsToAllIdes()
@@ -2684,7 +2778,11 @@ func scanRepoFolder(name string) ScanEntry {
 						entry.AvailableCmds = append(entry.AvailableCmds, cmd)
 					}
 
-					priorityScripts := []string{"dev", "start", "serve", "preview", "watch", "build", "run", "cli"}
+					// "build"/"run"/"cli"/"watch" used to be in this list, but
+					// they're compile steps or too ambiguous to trust as "this
+					// launches the thing" — a wrong guess here becomes a
+					// silently-broken MCP entry someone else's IDE tries to run.
+					priorityScripts := []string{"dev", "start", "serve", "preview"}
 					for _, sName := range priorityScripts {
 						if _, ok := pkg.Scripts[sName]; ok {
 							if pkgManager == "pnpm" {
@@ -2701,14 +2799,23 @@ func scanRepoFolder(name string) ScanEntry {
 					}
 
 					if entry.StartCommand == "" && len(pkg.Scripts) > 0 {
+						// No known launch-script name matched — fall back to
+						// *some* script rather than nothing, but pick it
+						// deterministically (Go map iteration order is
+						// randomized per-process) and flag it as a guess so
+						// the UI doesn't present it with false confidence.
+						scriptNames := make([]string, 0, len(pkg.Scripts))
 						for sName := range pkg.Scripts {
-							if pkgManager == "pnpm" {
-								entry.StartCommand = "pnpm run " + sName
-							} else {
-								entry.StartCommand = "npm run " + sName
-							}
-							break
+							scriptNames = append(scriptNames, sName)
 						}
+						sort.Strings(scriptNames)
+						sName := scriptNames[0]
+						if pkgManager == "pnpm" {
+							entry.StartCommand = "pnpm run " + sName
+						} else {
+							entry.StartCommand = "npm run " + sName
+						}
+						entry.StartCommandGuessed = true
 					}
 				}
 
@@ -3003,6 +3110,10 @@ func detectEnvVarNames(dir string) []string {
 
 func handleRepoEnvVars(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	dir := repoDir(name)
 	if _, err := os.Stat(dir); err != nil {
 		writeErr(w, 404, "yerel klasor yok")
@@ -3013,6 +3124,10 @@ func handleRepoEnvVars(w http.ResponseWriter, r *http.Request) {
 
 func handleRepoStart(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	dir := repoDir(name)
 	if _, err := os.Stat(dir); err != nil {
 		writeErr(w, 404, "yerel klasor yok")
@@ -4055,15 +4170,58 @@ func handleLoopConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.LoopConfig)
 }
 
+// isLocalOrigin reports whether an Origin/Referer header points at this
+// app's own 127.0.0.1/localhost:<port> — the only origin that should ever
+// be allowed to drive state-changing requests. A wildcard CORS origin on a
+// server that deletes repos and spawns processes lets *any* web page the
+// user happens to have open issue those requests silently.
+func isLocalOrigin(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := u.Hostname()
+	if host != "127.0.0.1" && host != "localhost" && host != "[::1]" && host != "::1" {
+		return false
+	}
+	port := u.Port()
+	return port == "" || port == strconv.Itoa(defaultPort)
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		if origin != "" && isLocalOrigin(origin) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else if origin == "" {
+			// Non-browser callers (curl, the app's own --once CLI mode)
+			// never send an Origin header — nothing to restrict for them.
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
 		w.Header().Set("Access-Control-Allow-Headers", "*")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return
 		}
+
+		// A browser always sets Origin (and usually Referer) truthfully —
+		// it can't be spoofed by page JS — so this is a reliable gate
+		// against a malicious site driving destructive requests even
+		// though the response itself can't be read cross-origin (CSRF,
+		// not just data leakage, since these endpoints run commands and
+		// delete files as a side effect of the request alone).
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete {
+			ref := r.Header.Get("Referer")
+			if (origin != "" && !isLocalOrigin(origin)) || (origin == "" && ref != "" && !isLocalOrigin(ref)) {
+				writeErr(w, 403, "forbidden origin")
+				return
+			}
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
