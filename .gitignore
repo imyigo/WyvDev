@@ -13,3 +13,7 @@ backups/*
 
 # Go build artifacts
 ai-toolkit.exe
+
+# Go binaries
+*.exe
+*.exe~
