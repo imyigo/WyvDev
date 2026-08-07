@@ -2510,6 +2510,7 @@ type InstallStep struct {
 	Label    string `json:"label"`
 	Cmd      string `json:"cmd"`
 	Required bool   `json:"required"`
+	Status   string `json:"status,omitempty"` // "done" = already satisfied, "error" = last run failed
 }
 
 type AnalyzeResult struct {
@@ -2601,17 +2602,34 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 			result.DiskEstimateMB += count / 5
 		}
 		nmDir := filepath.Join(dir, "node_modules")
+		nmExists := false
 		if _, err := os.Stat(nmDir); err == nil {
+			nmExists = true
 			result.InstalledDeps += result.TotalDeps
 		} else {
 			result.MissingFiles = append(result.MissingFiles, "node_modules")
 		}
 
-		// Use the right package manager for install
+		// Build install step — always listed so the user can re-run it
 		installStepID := pm + "-install"
 		installLabel := pm + " install"
-		installCmd := pm + " install"
-		steps = append(steps, InstallStep{ID: installStepID, Label: installLabel, Cmd: installCmd, Required: true})
+		// pnpm: use --no-frozen-lockfile so monorepos with workspace:* don't fail
+		var installCmd string
+		switch pm {
+		case "pnpm":
+			installCmd = "pnpm install --no-frozen-lockfile"
+		case "yarn":
+			installCmd = "yarn install --frozen-lockfile=false"
+		case "bun":
+			installCmd = "bun install"
+		default:
+			installCmd = "npm install"
+		}
+		installStep := InstallStep{ID: installStepID, Label: installLabel, Cmd: installCmd, Required: true}
+		if nmExists {
+			installStep.Status = "done" // already installed — show green in UI
+		}
+		steps = append(steps, installStep)
 
 		// Check for build scripts
 		var pkg2 map[string]interface{}

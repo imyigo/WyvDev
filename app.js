@@ -1068,6 +1068,13 @@ function renderAimSteps(steps) {
     return;
   }
 
+  // Pre-populate states from backend status field
+  steps.forEach(step => {
+    if (step.status && !_aimStepStates[step.id]) {
+      _aimStepStates[step.id] = step.status; // "done" or "error"
+    }
+  });
+
   container.innerHTML = steps.map(step => {
     const state = _aimStepStates[step.id] || 'idle';
     const stateIcon = { idle: '⏳', running: '⚙️', done: '✅', error: '❌' }[state] || '⏳';
@@ -1075,18 +1082,24 @@ function renderAimSteps(steps) {
     const badge = step.required
       ? `<span class="text-[9px] px-1 py-0.5 rounded bg-rose-900/50 text-rose-300 border border-rose-700/50">Zorunlu</span>`
       : `<span class="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700">Opsiyonel</span>`;
+    const isDone = state === 'done';
     return `
       <div class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border ${stateCls} transition-all">
         <div class="flex items-center gap-2 min-w-0">
           <span class="text-sm shrink-0">${stateIcon}</span>
           <div class="min-w-0">
-            <div class="text-xs font-semibold truncate">${escapeHtml(step.label)}</div>
+            <div class="text-xs font-semibold truncate">${escapeHtml(step.label)}${isDone && state === 'done' && !_aimStepStates[step.id + '_ran'] ? ' <span class="text-[9px] text-emerald-500 font-normal">— zaten kurulu</span>' : ''}</div>
             <div class="text-[10px] font-mono text-gray-500 truncate">${escapeHtml(step.cmd)}</div>
           </div>
         </div>
         <div class="flex items-center gap-1.5 shrink-0">
           ${badge}
-          ${state !== 'running' ? `<button onclick="runSingleInstallStep('${escapeHtml(step.id)}', '${escapeHtml(step.label)}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-gray-800 hover:bg-indigo-900/60 text-gray-300 hover:text-indigo-200 border border-gray-700 cursor-pointer transition-all">▶ Çalıştır</button>` : `<span class="text-[10px] text-indigo-400 animate-pulse">Çalışıyor...</span>`}
+          ${state === 'running'
+            ? `<span class="text-[10px] text-indigo-400 animate-pulse">Çalışıyor...</span>`
+            : `<button onclick="runSingleInstallStep('${escapeHtml(step.id)}', '${escapeHtml(step.label)}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${isDone ? 'bg-gray-900 text-gray-600 border-gray-800 hover:bg-gray-800 hover:text-gray-400' : 'bg-gray-800 hover:bg-indigo-900/60 text-gray-300 hover:text-indigo-200 border-gray-700'} border cursor-pointer transition-all">
+                ${isDone ? '↺ Tekrar' : '▶ Çalıştır'}
+              </button>`
+          }
         </div>
       </div>`;
   }).join('');
