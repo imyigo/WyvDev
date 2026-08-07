@@ -2877,7 +2877,7 @@ function renderLibraryScan() {
 
   function statusBadge(entry) {
     const strategy = entry.runStrategy || entry.runMode || '';
-    const repoType = entry.repoType || (entry.looksLikeMcp ? 'mcp' : (entry.hasSkill ? 'skill' : ''));
+    const repoType = entry.repoType || (entry.hasSkill ? 'skill' : (entry.looksLikeMcp ? 'mcp' : ''));
 
     if (entry.isRunning) {
       const portTxt = entry.runningPort ? `Port: ${entry.runningPort}` : (entry.port ? `Port: ${entry.port}` : 'Aktif');

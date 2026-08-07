@@ -4460,13 +4460,13 @@ func scanRepoFolder(name string) ScanEntry {
 	}
 	runningAppsMux.RUnlock()
 
-	// Auto detect RepoType
-	if entry.LooksLikeMcp {
-		entry.RepoType = "mcp"
-		entry.RepoTypeLabel = "🔌 MCP Server"
-	} else if entry.HasSkill {
+	// Auto detect RepoType (Skill takes priority if SKILL.md is present)
+	if entry.HasSkill {
 		entry.RepoType = "skill"
 		entry.RepoTypeLabel = "📄 Skill"
+	} else if entry.LooksLikeMcp {
+		entry.RepoType = "mcp"
+		entry.RepoTypeLabel = "🔌 MCP Server"
 	} else if entry.IsInstalled || entry.StartCommand != "" || containsRuntime(entry.Runtimes, "docker") {
 		entry.RepoType = "service"
 		entry.RepoTypeLabel = "⚡ Service / App"
