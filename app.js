@@ -951,11 +951,23 @@ let _aimPipelineQueue = [];    // steps waiting in pipeline
 let _aimRunningPipeline = false;
 
 const RUNTIME_META = {
-  node:   { icon: '🟩', label: 'Node.js',  color: 'text-green-400' },
-  python: { icon: '🐍', label: 'Python',   color: 'text-yellow-400' },
-  rust:   { icon: '🦀', label: 'Rust',     color: 'text-orange-400' },
-  go:     { icon: '🐹', label: 'Go',       color: 'text-cyan-400' },
-  docker: { icon: '🐳', label: 'Docker',   color: 'text-blue-400' },
+  node:     { icon: '🟩', label: 'Node.js',       color: 'text-green-400' },
+  python:   { icon: '🐍', label: 'Python',         color: 'text-yellow-400' },
+  rust:     { icon: '🦀', label: 'Rust',           color: 'text-orange-400' },
+  go:       { icon: '🐹', label: 'Go',             color: 'text-cyan-400' },
+  docker:   { icon: '🐳', label: 'Docker',         color: 'text-blue-400' },
+  composer: { icon: '🐘', label: 'PHP Composer',   color: 'text-indigo-400' },
+  gem:      { icon: '💎', label: 'Ruby Gems',      color: 'text-red-400' },
+  maven:    { icon: '☕', label: 'Maven',           color: 'text-orange-500' },
+  gradle:   { icon: '🐘', label: 'Gradle',         color: 'text-teal-400' },
+  make:     { icon: '⚙️', label: 'Makefile',       color: 'text-gray-400' },
+};
+
+const PM_META = {
+  pnpm: { icon: '⚡', label: 'pnpm', color: 'text-yellow-300' },
+  yarn: { icon: '🧶', label: 'Yarn', color: 'text-blue-300' },
+  bun:  { icon: '🍞', label: 'Bun',  color: 'text-amber-300' },
+  npm:  { icon: '📦', label: 'npm',  color: 'text-red-300' },
 };
 
 async function showAdvancedInstallModal(repoName) {
@@ -1000,14 +1012,16 @@ function renderAimAnalysis(a) {
 
   // Runtimes
   const rtContainer = document.getElementById('aim-runtimes');
-  if (a.runtimes && a.runtimes.length > 0) {
-    rtContainer.innerHTML = a.runtimes.map(rt => {
-      const m = RUNTIME_META[rt] || { icon: '⚙️', label: rt, color: 'text-gray-300' };
-      return `<div class="flex items-center gap-1.5 text-xs ${m.color}"><span>${m.icon}</span><span class="font-semibold">${m.label}</span></div>`;
-    }).join('');
-  } else {
-    rtContainer.innerHTML = '<div class="text-xs text-gray-600 italic">Tespit edilemedi</div>';
+  const rtItems = (a.runtimes || []).map(rt => {
+    const m = RUNTIME_META[rt] || { icon: '⚙️', label: rt, color: 'text-gray-300' };
+    return `<div class="flex items-center gap-1.5 text-xs ${m.color}"><span>${m.icon}</span><span class="font-semibold">${m.label}</span></div>`;
+  });
+  // Show package manager badge if Node.js detected
+  if (a.packageManager && (a.runtimes || []).includes('node')) {
+    const pm = PM_META[a.packageManager] || { icon: '📦', label: a.packageManager, color: 'text-gray-300' };
+    rtItems.push(`<div class="flex items-center gap-1.5 text-xs ${pm.color} border border-gray-700 rounded px-1.5 py-0.5 w-fit">${pm.icon} <span class="font-mono">${pm.label}</span></div>`);
   }
+  rtContainer.innerHTML = rtItems.length ? rtItems.join('') : '<div class="text-xs text-gray-600 italic">Tespit edilemedi</div>';
 
   // Deps
   document.getElementById('aim-deps').textContent =

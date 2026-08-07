@@ -2263,6 +2263,7 @@ type InstallStep struct {
 type AnalyzeResult struct {
 	Name            string        `json:"name"`
 	Runtimes        []string      `json:"runtimes"`
+	PackageManager  string        `json:"packageManager,omitempty"` // "npm" | "pnpm" | "yarn" | "bun"
 	TotalDeps       int           `json:"totalDeps"`
 	InstalledDeps   int           `json:"installedDeps"`
 	InstallPercent  int           `json:"installPercent"`
@@ -2274,6 +2275,40 @@ type AnalyzeResult struct {
 	HasDockerfile   bool          `json:"hasDockerfile"`
 	HasCompose      bool          `json:"hasCompose"`
 	HasMakefile     bool          `json:"hasMakefile"`
+}
+
+// detectNodePackageManager returns the right package manager for a Node.js project.
+// Priority: pnpm-lock.yaml → yarn.lock → bun.lockb → package-lock.json → npm (default)
+// Also detects workspace:* protocol which only pnpm/yarn can handle.
+func detectNodePackageManager(dir string, pkgData []byte) string {
+	// Lock file detection (most reliable)
+	if _, err := os.Stat(filepath.Join(dir, "pnpm-lock.yaml")); err == nil {
+		return "pnpm"
+	}
+	if _, err := os.Stat(filepath.Join(dir, "yarn.lock")); err == nil {
+		return "yarn"
+	}
+	if _, err := os.Stat(filepath.Join(dir, "bun.lockb")); err == nil {
+		return "bun"
+	}
+	// workspace:* protocol → only pnpm/yarn can handle, default to pnpm
+	if strings.Contains(string(pkgData), `"workspace:`) {
+		return "pnpm"
+	}
+	// Check packageManager field in package.json
+	var pkg map[string]interface{}
+	if json.Unmarshal(pkgData, &pkg) == nil {
+		if pm, ok := pkg["packageManager"].(string); ok {
+			if strings.HasPrefix(pm, "pnpm") {
+				return "pnpm"
+			} else if strings.HasPrefix(pm, "yarn") {
+				return "yarn"
+			} else if strings.HasPrefix(pm, "bun") {
+				return "bun"
+			}
+		}
+	}
+	return "npm"
 }
 
 func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
@@ -2296,6 +2331,11 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 	pkgJson := filepath.Join(dir, "package.json")
 	if data, err := os.ReadFile(pkgJson); err == nil {
 		runtimeSet["node"] = true
+
+		// Detect the correct package manager FIRST
+		pm := detectNodePackageManager(dir, data)
+		result.PackageManager = pm
+
 		var pkg map[string]interface{}
 		if json.Unmarshal(data, &pkg) == nil {
 			count := 0
@@ -2306,7 +2346,7 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 				count += len(dev)
 			}
 			result.TotalDeps += count
-			result.DiskEstimateMB += count / 5 // rough estimate ~200KB per package
+			result.DiskEstimateMB += count / 5
 		}
 		nmDir := filepath.Join(dir, "node_modules")
 		if _, err := os.Stat(nmDir); err == nil {
@@ -2314,14 +2354,21 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 		} else {
 			result.MissingFiles = append(result.MissingFiles, "node_modules")
 		}
-		steps = append(steps, InstallStep{ID: "npm-install", Label: "npm install", Cmd: "npm install", Required: true})
+
+		// Use the right package manager for install
+		installStepID := pm + "-install"
+		installLabel := pm + " install"
+		installCmd := pm + " install"
+		steps = append(steps, InstallStep{ID: installStepID, Label: installLabel, Cmd: installCmd, Required: true})
 
 		// Check for build scripts
-		if scripts, ok := pkg["scripts"].(map[string]interface{}); ok {
+		var pkg2 map[string]interface{}
+		_ = json.Unmarshal(data, &pkg2)
+		if scripts, ok := pkg2["scripts"].(map[string]interface{}); ok {
 			if _, hasBuild := scripts["build"]; hasBuild {
-				steps = append(steps, InstallStep{ID: "npm-build", Label: "npm run build", Cmd: "npm run build", Required: false})
+				buildStepID := pm + "-build"
+				steps = append(steps, InstallStep{ID: buildStepID, Label: pm + " run build", Cmd: pm + " run build", Required: false})
 			}
-			// Detect common port patterns
 			if start, ok := scripts["start"].(string); ok {
 				if strings.Contains(start, "3000") {
 					result.PortSuggestion = 3000
@@ -2567,6 +2614,18 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 		toolName, args = "npm", []string{"install"}
 	case "npm-build":
 		toolName, args = "npm", []string{"run", "build"}
+	case "pnpm-install":
+		toolName, args = "pnpm", []string{"install"}
+	case "pnpm-build":
+		toolName, args = "pnpm", []string{"run", "build"}
+	case "yarn-install":
+		toolName, args = "yarn", []string{"install"}
+	case "yarn-build":
+		toolName, args = "yarn", []string{"run", "build"}
+	case "bun-install":
+		toolName, args = "bun", []string{"install"}
+	case "bun-build":
+		toolName, args = "bun", []string{"run", "build"}
 	case "pip-install":
 		toolName, args = "pip", []string{"install", "-r", "requirements.txt"}
 	case "pip-install-pyproject":
@@ -2643,6 +2702,33 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 			f.Flush()
 		}
 		return
+	}
+
+	// Docker daemon check — works with any Docker installation (Engine, Colima, OrbStack, Podman, etc.)
+	// No Docker Desktop assumption — just verify the daemon is reachable.
+	if toolName == "docker" {
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer checkCancel()
+		checkCmd := enhancedCommand(checkCtx, "docker", "info", "--format", "{{.ServerVersion}}")
+		if out, err := checkCmd.CombinedOutput(); err != nil {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-Accel-Buffering", "no")
+			fmt.Fprintf(w, "data: ❌ Docker daemon çalışmıyor.\n\n")
+			fmt.Fprintf(w, "data: Terminalde 'docker info' komutunu çalıştırarak kontrol edebilirsiniz.\n\n")
+			fmt.Fprintf(w, "data: (Docker Engine, Colima, OrbStack, Podman veya herhangi bir daemon çalışıyor olmalı)\n\n")
+			if len(out) > 0 {
+				fmt.Fprintf(w, "data: Hata: %s\n\n", strings.TrimSpace(string(out)))
+			}
+			fmt.Fprintf(w, "event: error\ndata: docker-daemon-not-running\n\n")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			return
+		} else {
+			// Log which docker version was found
+			_ = out
+		}
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -3053,6 +3139,18 @@ func runInstallStepBlocking(ctx context.Context, repoName, dir, stepID string) e
 		toolName, args = "npm", []string{"run", "build"}
 	case "npm-repair":
 		toolName, args = "npm", []string{"install", "--force"}
+	case "pnpm-install":
+		toolName, args = "pnpm", []string{"install"}
+	case "pnpm-build":
+		toolName, args = "pnpm", []string{"run", "build"}
+	case "yarn-install":
+		toolName, args = "yarn", []string{"install"}
+	case "yarn-build":
+		toolName, args = "yarn", []string{"run", "build"}
+	case "bun-install":
+		toolName, args = "bun", []string{"install"}
+	case "bun-build":
+		toolName, args = "bun", []string{"run", "build"}
 	case "pip-install":
 		toolName, args = "pip", []string{"install", "-r", "requirements.txt"}
 	case "pip-install-pyproject":
@@ -3087,6 +3185,16 @@ func runInstallStepBlocking(ctx context.Context, repoName, dir, stepID string) e
 
 	if !commandExistsInEnv(toolName, getEnhancedEnv()) {
 		return fmt.Errorf("'%s' bulunamadı", toolName)
+	}
+
+	// Docker daemon check — any docker installation, not just Docker Desktop
+	if toolName == "docker" {
+		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		out, err := enhancedCommand(checkCtx, "docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput()
+		checkCancel()
+		if err != nil {
+			return fmt.Errorf("docker daemon çalışmıyor ('docker info' başarısız): %s", strings.TrimSpace(string(out)))
+		}
 	}
 
 	cmd := enhancedCommand(ctx, toolName, args...)
