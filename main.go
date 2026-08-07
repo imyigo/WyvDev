@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -943,7 +944,12 @@ func reconcileState(s *StateBundle) []string {
 func saveState(s *StateBundle) error {
 	stateFileMux.Lock()
 	defer stateFileMux.Unlock()
+	return saveStateLocked(s)
+}
 
+// saveStateLocked writes state.json without acquiring stateFileMux.
+// Callers MUST already hold stateFileMux.
+func saveStateLocked(s *StateBundle) error {
 	if err := os.MkdirAll(filepath.Join(getBaseDir(), "core"), 0755); err != nil {
 		return err
 	}
@@ -2456,7 +2462,7 @@ func handleRepoRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	safeTag := "ai-toolkit-" + sanitizeDockerTag(name)
+	safeTag := "wyvdev-" + sanitizeDockerTag(name)
 
 	var toolName string
 	var args []string
@@ -2725,6 +2731,12 @@ func determineRunStrategy(name, dir string) RunStrategy {
 		return s
 	}
 
+	// Case 2.5: Skill-only (no runtime, only SKILL.md)
+	if findSkillMd(dir) != "" {
+		s.Mode = "skill-only"
+		return s
+	}
+
 	// Case 3: Go
 	if hasFile("go.mod") {
 		s.Mode = "local"
@@ -2901,11 +2913,7 @@ func determineRunStrategy(name, dir string) RunStrategy {
 		return s
 	}
 
-	// Case 11: Skill-only (no runtime, only SKILL.md)
-	if findSkillMd(dir) != "" {
-		s.Mode = "skill-only"
-		return s
-	}
+
 
 	// Case 12: Looks like MCP (has stdio entrypoint markers)
 	if hasFile("mcp.json") || hasFile("mcp_server.py") || hasFile("server.py") {
@@ -4195,8 +4203,6 @@ func scanRepoFolder(name string) ScanEntry {
 	entry.Repo = gitRemoteRepo(dir)
 
 	// Installation detection — strategy-aware
-	// Docker-first: if this is a Docker/Compose project, node_modules/venv
-	// are irrelevant — the container installs them internally.
 	hasDockerfile := false
 	hasCompose := false
 	for _, cf := range []string{"Dockerfile", "dockerfile"} {
@@ -4213,17 +4219,9 @@ func scanRepoFolder(name string) ScanEntry {
 	}
 
 	if hasCompose || hasDockerfile {
-		// Docker projects: IsInstalled = true only if the Docker image already built.
-		// Lightweight check: docker image ls <tag> --quiet (skip if docker not available)
-		if commandExistsInEnv("docker", getEnhancedEnv()) {
-			safeTag := "wyvdev-" + sanitizeDockerTag(name)
-			ctx5, cancel5 := context.WithTimeout(context.Background(), 3*time.Second)
-			out, err5 := exec.CommandContext(ctx5, "docker", "image", "ls", safeTag, "--quiet").Output()
-			cancel5()
-			if err5 == nil && len(strings.TrimSpace(string(out))) > 0 {
-				entry.IsInstalled = true
-			}
-		}
+		// Docker/Compose: IsInstalled only when user explicitly ran install via AIM
+		// Don't run docker subprocess here — keep scan fast
+		entry.IsInstalled = false
 	} else {
 		// Local runtime: check for install artifacts
 		if _, err := os.Stat(filepath.Join(dir, "node_modules")); err == nil {
@@ -4480,23 +4478,23 @@ func scanRepoFolder(name string) ScanEntry {
 		entry.RepoTypeLabel = "📁 Diğer"
 	}
 
-	// A skill/plugin repo (e.g. a bundle of agent skills with an installer
-	// CLI) isn't "started" as a local service — its real action is enabling
-	// the skill into an IDE, not npm-installing and running whatever script
-	// happened to be its only one (often "test"). Drop the run-mode fields so
-	// the UI doesn't offer a Kur & Başlat button that doesn't mean anything here.
+	// Populate RunStrategy + Port from the unified engine
+	// (fast: determineRunStrategy only does os.Stat calls, no exec)
+	strat := determineRunStrategy(name, dir)
+	entry.RunStrategy = strat.Mode
+	entry.Port = strat.Port
+
 	if entry.RepoType == "skill" {
+		entry.RunStrategy = "skill-only"
 		entry.RunMode = ""
 		entry.MissingTool = ""
 		entry.LocalCommand = ""
 		entry.LocalArgs = nil
 	}
 
-	// Populate RunStrategy + Port from the unified engine
-	// (fast: determineRunStrategy only does os.Stat calls, no exec)
-	strat := determineRunStrategy(name, dir)
-	entry.RunStrategy = strat.Mode
-	entry.Port = strat.Port
+	if strat.RunCommand != "" && (entry.StartCommand == "" || entry.StartCommand == "docker run") {
+		entry.StartCommand = strat.RunCommand
+	}
 
 	return entry
 }
@@ -4662,14 +4660,30 @@ func handleRepoStart(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Fields(startCmdStr)
 	cmd := enhancedCommand(startCtx, parts[0], parts[1:]...)
 	cmd.Dir = dir
+	var startBuf bytes.Buffer
+	cmd.Stdout = &startBuf
+	cmd.Stderr = &startBuf
 
 	logActivity("repo-start", fmt.Sprintf("%s (%s)", name, startCmdStr))
 
 	go func() {
 		defer startCancel()
-		time.Sleep(500 * time.Millisecond)
+
+		// Start the process non-blocking so we can capture the PID immediately.
+		var startErr error
+		if startErr = cmd.Start(); startErr != nil {
+			repoStartErrorsMux.Lock()
+			repoStartErrors[name] = startErr.Error()
+			repoStartErrorsMux.Unlock()
+			finishTask(task, "error", fmt.Sprintf("%s başlatma hatası: %v", name, startErr))
+			return
+		}
+
+		// Capture PID and register as running app right after Start()
 		if cmd.Process != nil {
 			pid := cmd.Process.Pid
+			// Wait briefly for port to bind
+			time.Sleep(500 * time.Millisecond)
 			port := detectPortByPID(pid)
 			appObj := &RunningApp{
 				ID:        name,
@@ -4685,8 +4699,9 @@ func handleRepoStart(w http.ResponseWriter, r *http.Request) {
 			runningAppsMux.Unlock()
 		}
 
-		out, err := cmd.CombinedOutput()
-		outputStr := strings.TrimSpace(string(out))
+		// Wait for the process to finish
+		err := cmd.Wait()
+		outputStr := strings.TrimSpace(startBuf.String())
 
 		runningAppsMux.Lock()
 		delete(runningAppsMap, name)
@@ -4818,7 +4833,6 @@ func handleRepoMeta(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stateFileMux.Lock()
-	defer stateFileMux.Unlock()
 	s, err := loadStateLocked()
 	if err != nil || s == nil {
 		s = &StateBundle{}
@@ -4829,6 +4843,7 @@ func handleRepoMeta(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet {
 		meta := s.RepoMeta[name]
+		stateFileMux.Unlock()
 		writeJSON(w, 200, map[string]interface{}{
 			"ok":     true,
 			"pinned": meta.Pinned,
@@ -4843,6 +4858,7 @@ func handleRepoMeta(w http.ResponseWriter, r *http.Request) {
 		Note   *string `json:"note"`
 	}
 	if err2 := json.NewDecoder(r.Body).Decode(&body); err2 != nil {
+		stateFileMux.Unlock()
 		writeErr(w, 400, "geçersiz JSON")
 		return
 	}
@@ -4860,6 +4876,8 @@ func handleRepoMeta(w http.ResponseWriter, r *http.Request) {
 		meta.Note = *body.Note
 	}
 	s.RepoMeta[name] = meta
+	stateFileMux.Unlock()
+
 	_ = saveState(s)
 	logActivity("repo-meta", fmt.Sprintf("%s → pinned=%v", name, meta.Pinned))
 	writeJSON(w, 200, map[string]interface{}{"ok": true, "meta": meta})
@@ -5044,21 +5062,40 @@ func filterMcpsByName(mcps []MCPEntry, del map[string]bool) []MCPEntry {
 // ── Bulk Pull (SSE streaming) ─────────────────────────────────────────────────
 
 func handleRepoBulkPull(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Names []string `json:"names"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Names) == 0 {
-		writeErr(w, 400, "names dizisi gerekli")
-		return
+	var names []string
+
+	if r.Method == http.MethodGet {
+		// EventSource path: names passed as query param JSON
+		namesParam := r.URL.Query().Get("names")
+		if namesParam == "" {
+			writeErr(w, 400, "names query param gerekli")
+			return
+		}
+		if err := json.Unmarshal([]byte(namesParam), &names); err != nil || len(names) == 0 {
+			writeErr(w, 400, "gecersiz names param")
+			return
+		}
+	} else {
+		// POST path
+		var body struct {
+			Names []string `json:"names"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Names) == 0 {
+			writeErr(w, 400, "names dizisi gerekli")
+			return
+		}
+		names = body.Names
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	flusher, _ := w.(http.Flusher)
 
-	send := func(msg string) {
-		fmt.Fprintf(w, "data: %s\n\n", msg)
+	// sendEvent sends a named SSE event
+	sendEvent := func(eventType, msg string) {
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, msg)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -5070,10 +5107,10 @@ func handleRepoBulkPull(w http.ResponseWriter, r *http.Request) {
 		Output  string
 	}
 
-	results := make(chan pullResult, len(body.Names))
+	results := make(chan pullResult, len(names))
 	sem := make(chan struct{}, 4) // max 4 parallel pulls
 
-	for _, name := range body.Names {
+	for _, name := range names {
 		go func(n string) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -5094,23 +5131,22 @@ func handleRepoBulkPull(w http.ResponseWriter, r *http.Request) {
 		}(name)
 	}
 
-	send(fmt.Sprintf("🔄 %d repo güncelleniyor...", len(body.Names)))
+	sendEvent("log", fmt.Sprintf("🔄 %d repo güncelleniyor...", len(names)))
 	successCount, failCount := 0, 0
-	for i := 0; i < len(body.Names); i++ {
+	for i := 0; i < len(names); i++ {
 		res := <-results
 		if res.Success {
 			successCount++
-			send(fmt.Sprintf("✅ %s — %s", res.Name, res.Output))
+			sendEvent("log", fmt.Sprintf("✅ %s — %s", res.Name, res.Output))
 		} else {
 			failCount++
-			send(fmt.Sprintf("❌ %s — %s", res.Name, res.Output))
+			sendEvent("error-item", fmt.Sprintf("%s — %s", res.Name, res.Output))
 		}
 	}
-	send(fmt.Sprintf("\n📊 Tamamlandı: %d başarılı, %d başarısız", successCount, failCount))
-	fmt.Fprintf(w, "event: done\ndata: {\"success\":%d,\"failed\":%d}\n\n", successCount, failCount)
-	if flusher != nil {
-		flusher.Flush()
-	}
+	sendEvent("log", fmt.Sprintf("\n📊 Tamamlandı: %d başarılı, %d başarısız", successCount, failCount))
+	// Send done event with JSON payload for frontend
+	donePayload, _ := json.Marshal(map[string]int{"success": successCount, "failed": failCount})
+	sendEvent("done", string(donePayload))
 }
 
 func handleCheckAllRepos(w http.ResponseWriter, r *http.Request) {
@@ -5295,7 +5331,7 @@ func handleGithubSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "ai-toolkit-hub")
+	req.Header.Set("User-Agent", "wyvdev-hub")
 
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)
@@ -6202,7 +6238,7 @@ func killRunningApp(name string) {
 		}
 	}
 
-	safeTag := "ai-toolkit-" + sanitizeDockerTag(name)
+	safeTag := "wyvdev-" + sanitizeDockerTag(name)
 	_ = enhancedCommand(context.Background(), "docker", "stop", safeTag+"-run").Run()
 }
 
@@ -6245,7 +6281,7 @@ func handleIdeBackup(w http.ResponseWriter, r *http.Request) {
 	backedUpCount := 0
 
 	stateData, _ := json.MarshalIndent(s, "", "  ")
-	if fw, err := zw.Create("ai-toolkit-state.json"); err == nil {
+	if fw, err := zw.Create("wyvdev-state.json"); err == nil {
 		_, _ = fw.Write(stateData)
 		backedUpCount++
 	}
@@ -6750,6 +6786,7 @@ func runServer() {
 	mux.HandleFunc("GET /api/repos/scan", handleReposScan)
 	mux.HandleFunc("POST /api/repos/check-all", handleCheckAllRepos)
 	mux.HandleFunc("POST /api/repos/bulk-delete", handleRepoBulkDelete)
+	mux.HandleFunc("GET /api/repos/bulk-pull", handleRepoBulkPull)
 	mux.HandleFunc("POST /api/repos/bulk-pull", handleRepoBulkPull)
 	mux.HandleFunc("GET /api/activity", handleActivity)
 	mux.HandleFunc("GET /api/tasks", handleTasks)

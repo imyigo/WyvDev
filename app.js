@@ -558,6 +558,7 @@ function addMcpFromGithub(index) {
 
 function renderMcps() {
   const container = document.getElementById('mcp-grid');
+  if (!container) return;
   const countBadge = document.getElementById('mcp-count-badge');
   if (countBadge) countBadge.innerText = activeMcpServers.length;
 
@@ -568,8 +569,6 @@ function renderMcps() {
       <button onclick="filterMcpCategory('${cat}')" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer transition-all ${selectedCategory === cat ? 'bg-cyan-600 text-white' : 'bg-gray-800 text-gray-400 hover:text-gray-200'}">${cat === 'All' ? 'Tümü' : escapeHtml(cat)}</button>
     `).join('');
   }
-
-  if (!container) return;
 
   const filtered = selectedCategory === 'All' ? activeMcpServers : activeMcpServers.filter(s => s.category === selectedCategory);
 
@@ -765,6 +764,7 @@ async function loadMcpEnvSuggestions(repoName, mcpId) {
 function addMcpEnvVar(id, presetKey) {
   const keyInput = document.getElementById('mcp-new-var-key');
   const valueInput = document.getElementById('mcp-new-var-value');
+  if (!keyInput || !valueInput) return;
   const key = (presetKey || keyInput?.value || '').trim();
   if (!key) {
     showToast('⚠️ Değişken adı boş olamaz.');
@@ -998,7 +998,9 @@ async function showAdvancedInstallModal(repoName) {
   try {
     const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(repoName)}/analyze`);
     if (!res.ok) throw new Error(await res.text());
-    _aimAnalysis = await res.json();
+    const analysis = await res.json();
+    if (_aimCurrentRepo !== repoName) return;
+    _aimAnalysis = analysis;
     renderAimAnalysis(_aimAnalysis);
   } catch (e) {
     document.getElementById('aim-loading').innerHTML =
@@ -1498,11 +1500,16 @@ function runAllInstallSteps() {
     showToast('Kurulum adımı bulunamadı.');
     return;
   }
-  // Reset all states
-  _aimStepStates = {};
-  _aimPipelineQueue = [..._aimAnalysis.installSteps];
+  
+  const stepsToRun = _aimAnalysis.installSteps.filter(step => _aimStepStates[step.id] !== 'done');
+  if (stepsToRun.length === 0) {
+    showToast('Çalıştırılacak adım kalmadı (hepsi tamamlanmış).');
+    return;
+  }
+  
+  _aimPipelineQueue = [...stepsToRun];
   _aimRunningPipeline = true;
-  aimTerminalAppend('\n🚀 Pipeline başlatılıyor — tüm adımlar sırayla çalışacak', 'text-indigo-300 font-bold');
+  aimTerminalAppend(`\n🚀 Pipeline başlatılıyor — ${stepsToRun.length} adım sırayla çalışacak`, 'text-indigo-300 font-bold');
   _continueAimPipeline();
 }
 
@@ -1606,9 +1613,9 @@ function renderIdePaths() {
 
 function renderSkills() {
   const container = document.getElementById('skills-grid');
+  if (!container) return;
   const countBadge = document.getElementById('skill-count-badge');
   if (countBadge) countBadge.innerText = activeRecommendedRepos.length;
-  if (!container) return;
 
   if (activeRecommendedRepos.length === 0) {
     container.innerHTML = '<p class="text-xs text-gray-400 col-span-full text-center py-8">Kaldırılmamış önerilen repo kalmadı. İstediğiniz zaman varsayılan repolara sıfırlayabilirsiniz.</p>';
@@ -2664,29 +2671,30 @@ async function bulkPullSelected() {
   if (_selectedRepos.size === 0) return;
   const names = [..._selectedRepos];
   const termEl = document.getElementById('aim-terminal');
-  // Use a simple toast flow for bulk pull
   showToast(`🔄 ${names.length} repo güncelleniyor...`);
   try {
-    const es = new EventSource(`${API_BASE}/api/repos/bulk-pull?` + new URLSearchParams({names: JSON.stringify(names)}));
-    // Fallback: POST approach
-    const res = await fetch(`${API_BASE}/api/repos/bulk-pull`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names })
+    const url = `${API_BASE}/api/repos/bulk-pull?` + new URLSearchParams({names: JSON.stringify(names)});
+    const es = new EventSource(url);
+    
+    es.addEventListener('log', e => {
+      showToast(e.data);
     });
-    // stream reading
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value);
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      lines.forEach(l => { if (l.startsWith('data: ')) showToast(l.slice(6)); });
-    }
-    clearBulkSelection();
-    await loadLibraryScan();
+    
+    es.addEventListener('error-item', e => {
+      showToast('⚠️ ' + e.data);
+    });
+    
+    es.addEventListener('done', async e => {
+      es.close();
+      clearBulkSelection();
+      await loadLibraryScan();
+    });
+    
+    es.onerror = () => {
+      if (es.readyState === EventSource.CLOSED) return;
+      es.close();
+      showToast('❌ Güncelleme bağlantısı koptu.');
+    };
   } catch (e) { showToast('❌ Güncelleme hatası: ' + e.message); }
 }
 
@@ -2848,7 +2856,9 @@ function renderLibraryScan() {
     }
     // Fallback
     if (!caps.length) {
-      caps.push(strategy === 'library' || strategy === 'skill-only' ? 'library' : 'other');
+      if (!strategy || strategy === 'library') caps.push('library');
+      else if (strategy === 'skill-only') caps.push('skill');
+      else caps.push('other');
     }
     return caps;
   }
@@ -3102,7 +3112,14 @@ function renderLibraryScan() {
       if (sortBy === 'installed') return (b.isInstalled ? 1 : 0) - (a.isInstalled ? 1 : 0);
       if (sortBy === 'recent') return (b.lastModifiedAt || '').localeCompare(a.lastModifiedAt || '');
       if (sortBy === 'size-desc') return (b.diskSizeMB || 0) - (a.diskSizeMB || 0);
-      if (sortBy === 'pinned') { if (a.pinned !== b.pinned) return a.pinned ? -1 : 1; return a.name.localeCompare(b.name); }
+      if (sortBy === 'pinned') {
+        const aPin = a.meta?.pinnedAt || '';
+        const bPin = b.meta?.pinnedAt || '';
+        const aPinned = a.meta?.pinned ? 1 : 0;
+        const bPinned = b.meta?.pinned ? 1 : 0;
+        if (bPinned !== aPinned) return bPinned - aPinned;
+        return bPin.localeCompare(aPin);
+      }
       return 0;
     });
 
