@@ -2520,7 +2520,7 @@ function renderLiveTasksWidget() {
   if (!widget) {
     widget = document.createElement('div');
     widget.id = 'live-tasks-widget';
-    widget.className = 'fixed bottom-5 left-5 z-40 max-w-sm space-y-2 pointer-events-none';
+    widget.className = 'fixed bottom-5 right-5 z-40 max-w-sm space-y-2 pointer-events-none';
     document.body.appendChild(widget);
   }
 

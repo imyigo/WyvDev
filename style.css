@@ -79,7 +79,7 @@ body {
   border-radius: 11px;
   display: flex;
   align-items: center;
-  justify-content: justify-center;
+  justify-content: center;
   color: var(--accent-cyan);
 }
 
