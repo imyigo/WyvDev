@@ -1244,6 +1244,94 @@ function runSingleInstallStep(stepId, stepLabel) {
     const cardId = 'repair-card-' + Date.now();
     const isDockerDown   = action.type === 'service-down' && action.service === 'docker';
     const isMissingTool  = action.type === 'missing-tool';
+    const suggested      = action.suggestedAction || '';
+    const workingCtxs    = action.workingContexts || [];
+    const alternatives   = action.alternatives   || [];
+    const runningAlts    = alternatives.filter(a => a.running && a.binary);
+
+    // Build action buttons section
+    let actionsHtml = '';
+
+    if (isDockerDown) {
+      // 1. Switch context buttons (if other docker contexts are working)
+      if (workingCtxs.length > 0) {
+        actionsHtml += `
+          <div class="w-full space-y-1 pb-1 border-b border-amber-800/30">
+            <div class="text-[10px] text-amber-400 font-semibold">🔀 Çalışan Docker Bağlamları:</div>
+            <div class="flex gap-1.5 flex-wrap">
+              ${workingCtxs.map(ctx => `
+                <button onclick="aimSwitchDockerContext('${escapeHtml(ctx)}', '${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}', '${cardId}')"
+                  class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer flex items-center gap-1 transition-all active:scale-95">
+                  ✓ ${escapeHtml(ctx)} ile devam et
+                </button>
+              `).join('')}
+            </div>
+          </div>`;
+      }
+
+      // 2. Running alternative runtimes (Podman, nerdctl, etc.)
+      if (runningAlts.length > 0) {
+        actionsHtml += `
+          <div class="w-full space-y-1 pb-1 border-b border-amber-800/30">
+            <div class="text-[10px] text-amber-400 font-semibold">🔄 Çalışan Alternatif Runtime'lar:</div>
+            <div class="flex gap-1.5 flex-wrap">
+              ${runningAlts.map(alt => `
+                <button onclick="aimRepairRetry('${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}')"
+                  title="${escapeHtml(alt.switchHint || '')}"
+                  class="px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer flex items-center gap-1 transition-all active:scale-95">
+                  ✓ ${escapeHtml(alt.name)} aktif — Tekrar Dene
+                </button>
+              `).join('')}
+            </div>
+          </div>`;
+      }
+
+      // 3. Start service button (when nothing works)
+      if (workingCtxs.length === 0 && runningAlts.length === 0) {
+        actionsHtml += `
+          <button id="${cardId}-start-btn" onclick="aimRepairStartService('docker', '${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}', '${cardId}')"
+            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
+            🐳 Daemon'ı Başlat
+          </button>`;
+        if (action.startCmd) {
+          actionsHtml += `<span class="text-gray-600 text-[10px]">veya: <code class="text-gray-400">${escapeHtml(action.startCmd)}</code></span>`;
+        }
+      }
+
+      // 4. Install hints for NOT-installed alternatives
+      const notInstalled = alternatives.filter(a => !a.running && a.installHint && a.binary !== 'dockerd' && a.binary !== 'colima' && a.binary !== 'orbctl');
+      if (!action.cliInstalled || (workingCtxs.length === 0 && runningAlts.length === 0 && notInstalled.length > 0)) {
+        actionsHtml += `
+          <details class="w-full">
+            <summary class="text-[10px] text-gray-500 cursor-pointer hover:text-gray-300">📦 Alternatif kurulum seçenekleri...</summary>
+            <div class="mt-1.5 space-y-1 pl-2">
+              ${alternatives.filter(a => a.installHint).map(alt => `
+                <div class="text-[10px] flex items-center gap-2">
+                  <span class="${alt.running ? 'text-emerald-400' : 'text-gray-500'}">${alt.running ? '✓' : '○'} ${escapeHtml(alt.name)}</span>
+                  <code class="text-gray-600">${escapeHtml(alt.installHint)}</code>
+                </div>
+              `).join('')}
+            </div>
+          </details>`;
+      }
+
+    } else if (isMissingTool) {
+      actionsHtml = `
+        <button onclick="installSystemTool('${escapeHtml(action.installId || action.service)}', this)"
+          class="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
+          ⚡ Tek Tıkla Kur
+        </button>
+        <button onclick="aimRepairRetry('${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}')"
+          class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
+          ↺ Tekrar Dene
+        </button>`;
+    } else {
+      actionsHtml = `
+        <button onclick="aimRepairRetry('${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}')"
+          class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer flex items-center gap-1.5">
+          ↺ Tekrar Dene
+        </button>`;
+    }
 
     const card = document.createElement('div');
     card.id = cardId;
@@ -1258,27 +1346,7 @@ function runSingleInstallStep(stepId, stepLabel) {
         <button onclick="document.getElementById('${cardId}').remove()" class="text-gray-600 hover:text-gray-400 cursor-pointer shrink-0">✕</button>
       </div>
       <div class="flex items-center gap-2 flex-wrap pt-1 border-t border-amber-800/40">
-        ${isDockerDown ? `
-          <button id="${cardId}-start-btn" onclick="aimRepairStartService('docker', '${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}', '${cardId}')"
-            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
-            <span>🐳</span> Servisi Başlat
-          </button>
-          <span class="text-gray-600 text-[10px]">veya terminalde: <code class="text-gray-400">${escapeHtml(action.startCmd || 'docker info')}</code></span>
-        ` : isMissingTool ? `
-          <button onclick="installSystemTool('${escapeHtml(action.installId || action.service)}', this)"
-            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
-            <span>⚡</span> Tek Tıkla Kur
-          </button>
-          <button onclick="aimRepairRetry('${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}')"
-            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
-            ↺ Tekrar Dene
-          </button>
-        ` : `
-          <button onclick="aimRepairRetry('${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}')"
-            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer flex items-center gap-1.5">
-            ↺ Tekrar Dene
-          </button>
-        `}
+        ${actionsHtml}
         <button onclick="aimSkipRepairAndContinue('${cardId}')"
           class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-800 hover:bg-gray-700 text-gray-400 cursor-pointer transition-all">
           ⏭ Atla & Devam Et
@@ -1294,6 +1362,28 @@ function runSingleInstallStep(stepId, stepLabel) {
     }
   });
 }
+
+// Switch docker context and retry the step
+async function aimSwitchDockerContext(ctxName, retryStepId, retryStepLabel, cardId) {
+  const card = document.getElementById(cardId);
+  aimTerminalAppend(`\n🔀 Docker bağlamı "${ctxName}" olarak değiştiriliyor...`, 'text-blue-300 font-bold');
+  try {
+    const res = await fetch(`${API_BASE}/api/repair/switch-docker-context`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ context: ctxName }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Bağlam değiştirilemedi');
+    aimTerminalAppend(`✅ Bağlam "${ctxName}" olarak ayarlandı. Adım yeniden çalıştırılıyor...`, 'text-emerald-400');
+    if (card) card.remove();
+    runSingleInstallStep(retryStepId, retryStepLabel);
+    if (_aimRunningPipeline) _continueAimPipeline();
+  } catch(e) {
+    aimTerminalAppend('❌ Bağlam değiştirilemedi: ' + e.message, 'text-red-400');
+  }
+}
+
 
 // Start a downed service via SSE and auto-retry the step when ready
 async function aimRepairStartService(service, retryStepId, retryStepLabel, cardId) {

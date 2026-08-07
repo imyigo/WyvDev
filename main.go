@@ -3028,38 +3028,54 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Docker daemon check — works with any Docker installation (Engine, Colima, OrbStack, Podman, etc.)
-	// No Docker Desktop assumption — just verify the daemon is reachable.
+	// Docker daemon check — smart multi-engine detection, no raw error output.
 	if toolName == "docker" {
-		checkCtx, checkCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer checkCancel()
-		checkCmd := enhancedCommand(checkCtx, "docker", "info", "--format", "{{.ServerVersion}}")
-		if out, err := checkCmd.CombinedOutput(); err != nil {
+		ds := detectDockerStatus()
+		if !ds.DaemonRunning {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
-			fmt.Fprintf(w, "data: ❌ Docker daemon çalışmıyor.\n\n")
-			if len(out) > 0 {
-				fmt.Fprintf(w, "data: %s\n\n", strings.TrimSpace(string(out)))
+
+			// Build a clean, user-friendly title & description
+			var title, description string
+			switch {
+			case !ds.CLIInstalled:
+				title = "Docker CLI Bulunamadı"
+				description = "docker komutu PATH'de yok. Aşağıdaki alternatiflerden birini kurabilirsiniz."
+			case len(ds.WorkingContexts) > 0:
+				title = "Docker Bağlam Değiştirilebilir"
+				description = fmt.Sprintf("Mevcut bağlam ('%s') çalışmıyor, ancak şu bağlamlar hazır: %s",
+					ds.CurrentContext, strings.Join(ds.WorkingContexts, ", "))
+			case hasRunningAlternative(ds.Alternatives):
+				title = "Alternatif Container Runtime Mevcut"
+				description = "Docker Desktop çalışmıyor ama başka bir uyumlu runtime aktif."
+			default:
+				title = "Docker Daemon Çalışmıyor"
+				description = "Herhangi bir Docker uyumlu daemon (Docker Engine, Podman, Rancher Desktop, Colima, OrbStack) aktif değil."
 			}
-			// Structured repair-action event so the UI can show a one-click fix card
-			startCmd := repairStartCmd("docker")
+
+			fmt.Fprintf(w, "data: ❌ %s\n\n", title)
+
+			// Build structured repair-action payload
 			payload, _ := json.Marshal(map[string]interface{}{
-				"type":        "service-down",
-				"service":     "docker",
-				"title":       "Docker Daemon Çalışmıyor",
-				"description": "Docker Engine, Colima, OrbStack veya Podman gibi bir daemon aktif olmalı.",
-				"startCmd":    startCmd,
-				"retryStepId": stepID,
-				"canRetry":    true,
+				"type":             "service-down",
+				"service":          "docker",
+				"title":            title,
+				"description":      description,
+				"startCmd":         repairStartCmd("docker"),
+				"retryStepId":      stepID,
+				"canRetry":         true,
+				"suggestedAction":  ds.SuggestedAction,
+				"workingContexts":  ds.WorkingContexts,
+				"currentContext":   ds.CurrentContext,
+				"alternatives":     ds.Alternatives,
+				"cliInstalled":     ds.CLIInstalled,
 			})
 			fmt.Fprintf(w, "event: repair-action\ndata: %s\n\n", string(payload))
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 			return
-		} else {
-			_ = out
 		}
 	}
 
@@ -3074,6 +3090,10 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 	sendEvent := func(line string) {
 		line = strings.ReplaceAll(line, "\r", "")
 		if line == "" {
+			return
+		}
+		// Suppress raw Docker connectivity errors — these are replaced by repair-action cards
+		if toolName == "docker" && isDockerConnectError(line) {
 			return
 		}
 		fmt.Fprintf(w, "data: %s\n\n", line)
@@ -5195,6 +5215,189 @@ func buildInstallCmds() map[string]installCmdDef {
 	}
 }
 
+// DockerStatus describes the current Docker availability on this machine.
+type DockerStatus struct {
+	CLIInstalled    bool     // docker binary found in PATH
+	DaemonRunning   bool     // current context's daemon responds
+	ServerVersion   string   // e.g. "28.1.0"
+	CurrentContext  string   // e.g. "desktop-linux" / "default"
+	WorkingContexts []string // contexts whose daemon IS reachable
+	Alternatives    []DockerAlternative
+	SuggestedAction string // human-readable suggestion
+}
+
+// DockerAlternative is a non-default Docker-compatible runtime that was detected.
+type DockerAlternative struct {
+	Name        string // "Podman", "Rancher Desktop", etc.
+	Binary      string // binary name e.g. "podman"
+	Running     bool   // daemon reachable?
+	SwitchHint  string // what to do to use it
+	InstallHint string // how to install it if not present
+}
+
+// detectDockerStatus probes the Docker ecosystem on the current machine.
+// It intentionally does NOT print scary error messages — callers get clean data.
+func detectDockerStatus() DockerStatus {
+	status := DockerStatus{}
+
+	// 1. Is the docker CLI available?
+	if !commandExistsInEnv("docker", getEnhancedEnv()) {
+		status.SuggestedAction = "install-docker"
+		// Check alternatives even if docker is missing
+		status.Alternatives = probeDockerAlternatives()
+		return status
+	}
+	status.CLIInstalled = true
+
+	// 2. Try current context — 5s timeout, suppress stderr
+	ctx5, cancel5 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel5()
+	infoCmd := enhancedCommand(ctx5, "docker", "info", "--format", "{{.ServerVersion}}")
+	if out, err := infoCmd.Output(); err == nil {
+		status.DaemonRunning = true
+		status.ServerVersion = strings.TrimSpace(string(out))
+	}
+
+	// 3. Find current context name (best-effort)
+	ctxCmd := enhancedCommand(ctx5, "docker", "context", "show")
+	if out, err := ctxCmd.Output(); err == nil {
+		status.CurrentContext = strings.TrimSpace(string(out))
+	}
+
+	// 4. If current context is down, enumerate all available contexts
+	if !status.DaemonRunning {
+		lsCtx, cancelLs := context.WithTimeout(context.Background(), 4*time.Second)
+		defer cancelLs()
+		lsCmd := enhancedCommand(lsCtx, "docker", "context", "ls", "--format", "{{.Name}}")
+		if lsOut, lsErr := lsCmd.Output(); lsErr == nil {
+			for _, ctxName := range strings.Split(strings.TrimSpace(string(lsOut)), "\n") {
+				ctxName = strings.TrimSpace(ctxName)
+				if ctxName == "" || ctxName == status.CurrentContext {
+					continue
+				}
+				// Try this context quickly
+				testCtx, testCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				testCmd := enhancedCommand(testCtx, "docker", "--context", ctxName, "info", "--format", "{{.ServerVersion}}")
+				if testOut, testErr := testCmd.Output(); testErr == nil && strings.TrimSpace(string(testOut)) != "" {
+					status.WorkingContexts = append(status.WorkingContexts, ctxName)
+				}
+				testCancel()
+			}
+		}
+	}
+
+	// 5. Probe known alternative runtimes
+	status.Alternatives = probeDockerAlternatives()
+
+	// 6. Derive suggested action
+	if status.DaemonRunning {
+		status.SuggestedAction = "ok"
+	} else if len(status.WorkingContexts) > 0 {
+		status.SuggestedAction = "switch-context"
+	} else if hasRunningAlternative(status.Alternatives) {
+		status.SuggestedAction = "use-alternative"
+	} else {
+		status.SuggestedAction = "start-daemon"
+	}
+
+	return status
+}
+
+func hasRunningAlternative(alts []DockerAlternative) bool {
+	for _, a := range alts {
+		if a.Running {
+			return true
+		}
+	}
+	return false
+}
+
+// probeDockerAlternatives checks for Podman, Rancher Desktop, Colima, OrbStack, etc.
+func probeDockerAlternatives() []DockerAlternative {
+	alts := []DockerAlternative{}
+
+	type altDef struct {
+		name        string
+		binary      string
+		checkArgs   []string
+		switchHint  string
+		installHint string
+	}
+
+	candidates := []altDef{
+		{
+			name: "Podman", binary: "podman",
+			checkArgs:   []string{"info", "--format", "{{.Version.Version}}"},
+			switchHint:  "podman machine start && export DOCKER_HOST=$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}')",
+			installHint: "https://podman.io veya: winget install -e --id RedHat.Podman",
+		},
+		{
+			name: "Rancher Desktop", binary: "nerdctl",
+			checkArgs:   []string{"info", "--format", "{{.ServerVersion}}"},
+			switchHint:  "Rancher Desktop'ı açın, Preferences → Container Engine → dockerd seçin",
+			installHint: "https://rancherdesktop.io",
+		},
+		{
+			name: "Colima (macOS)", binary: "colima",
+			checkArgs:   []string{"status"},
+			switchHint:  "colima start",
+			installHint: "brew install colima",
+		},
+		{
+			name: "OrbStack (macOS)", binary: "orbctl",
+			checkArgs:   []string{"version"},
+			switchHint:  "OrbStack uygulamasını açın",
+			installHint: "https://orbstack.dev",
+		},
+		{
+			name: "Docker Engine (Linux)", binary: "dockerd",
+			checkArgs:   []string{"--version"},
+			switchHint:  "sudo systemctl start docker",
+			installHint: "curl -fsSL https://get.docker.com | sh",
+		},
+	}
+
+	for _, c := range candidates {
+		if !commandExistsInEnv(c.binary, getEnhancedEnv()) {
+			alts = append(alts, DockerAlternative{
+				Name: c.name, Binary: c.binary, Running: false, InstallHint: c.installHint,
+			})
+			continue
+		}
+		// Binary exists — is its daemon running?
+		testCtx, testCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		testCmd := enhancedCommand(testCtx, c.binary, c.checkArgs...)
+		running := testCmd.Run() == nil
+		testCancel()
+		alts = append(alts, DockerAlternative{
+			Name:        c.name,
+			Binary:      c.binary,
+			Running:     running,
+			SwitchHint:  c.switchHint,
+			InstallHint: c.installHint,
+		})
+	}
+	return alts
+}
+
+// isDockerConnectError returns true if the error output looks like a daemon connectivity
+// error (npipe, unix socket, TLS, etc.) so we can suppress the raw message.
+func isDockerConnectError(s string) bool {
+	patterns := []string{
+		"npipe:", "dockerDesktopLinuxEngine", "docker API", "daemon is running",
+		"Cannot connect", "connection refused", "no such file or directory",
+		"pipe/docker", "unix:///", "open //./pipe",
+		"check if the path is correct",
+	}
+	lower := strings.ToLower(s)
+	for _, p := range patterns {
+		if strings.Contains(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
 // repairStartCmd returns the best command to start a service on the current OS.
 func repairStartCmd(service string) string {
 	switch service {
@@ -5214,6 +5417,45 @@ func repairStartCmd(service string) string {
 
 // handleRepairStartService tries to start a known service (e.g. docker) and
 // streams back SSE progress so the UI can show a live status and retry.
+// handleRepairSwitchDockerContext runs `docker context use <name>` and verifies it works.
+func handleRepairSwitchDockerContext(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Context string `json:"context"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Context == "" {
+		writeErr(w, 400, "context gerekli")
+		return
+	}
+	// Safety: only allow alphanumeric + dash + underscore
+	for _, c := range body.Context {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			writeErr(w, 400, "geçersiz bağlam adı")
+			return
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := enhancedCommand(ctx, "docker", "context", "use", body.Context).CombinedOutput()
+	if err != nil {
+		writeErr(w, 500, fmt.Sprintf("docker context use başarısız: %s", strings.TrimSpace(string(out))))
+		return
+	}
+	// Verify new context works
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer verifyCancel()
+	vOut, vErr := enhancedCommand(verifyCtx, "docker", "info", "--format", "{{.ServerVersion}}").Output()
+	if vErr != nil {
+		writeErr(w, 424, fmt.Sprintf("Bağlam '%s' değiştirildi ama daemon hâlâ erişilemiyor", body.Context))
+		return
+	}
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":      true,
+		"context": body.Context,
+		"version": strings.TrimSpace(string(vOut)),
+		"message": fmt.Sprintf("✅ Docker bağlamı '%s' olarak ayarlandı (v%s)", body.Context, strings.TrimSpace(string(vOut))),
+	})
+}
+
 func handleRepairStartService(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Service string `json:"service"`
@@ -6012,7 +6254,9 @@ func runServer() {
 	mux.HandleFunc("GET /api/ide/import-preview", handleIdeImportPreview)
 	mux.HandleFunc("POST /api/ide/import", handleIdeImport)
 	mux.HandleFunc("POST /api/repair/start-service", handleRepairStartService)
+	mux.HandleFunc("POST /api/repair/switch-docker-context", handleRepairSwitchDockerContext)
 	mux.Handle("/", http.FileServer(http.Dir(baseDir)))
+
 
 	addr := fmt.Sprintf("127.0.0.1:%d", defaultPort)
 	url := fmt.Sprintf("http://%s/index.html", addr)
