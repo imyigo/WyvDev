@@ -1201,7 +1201,145 @@ function runSingleInstallStep(stepId, stepLabel) {
     document.getElementById('aim-run-all-btn').disabled = false;
     _aimRunningPipeline = false;
   };
+
+  // ── Repair Action handler ──────────────────────────────────────
+  // Backend emits event: repair-action with JSON payload describing the problem
+  // and what action to offer the user.
+  sse.addEventListener('repair-action', (e) => {
+    _aimStepStates[stepId] = 'error';
+    sse.close(); _aimCurrentSSE = null;
+    if (_aimAnalysis) renderAimSteps(_aimAnalysis.installSteps);
+    document.getElementById('aim-stop-btn').classList.add('hidden');
+    document.getElementById('aim-run-all-btn').disabled = false;
+
+    let action = {};
+    try { action = JSON.parse(e.data); } catch(_) {}
+
+    // Render a rich action card inside the terminal
+    const cardId = 'repair-card-' + Date.now();
+    const isDockerDown   = action.type === 'service-down' && action.service === 'docker';
+    const isMissingTool  = action.type === 'missing-tool';
+
+    const card = document.createElement('div');
+    card.id = cardId;
+    card.className = 'my-2 p-3 rounded-xl border border-amber-500/40 bg-amber-950/30 space-y-2 text-xs';
+    card.innerHTML = `
+      <div class="flex items-start gap-2">
+        <span class="text-xl shrink-0">${isDockerDown ? '🐳' : isMissingTool ? '📦' : '🔧'}</span>
+        <div class="flex-1">
+          <div class="font-bold text-amber-200 text-sm">${escapeHtml(action.title || 'Onarım Gerekli')}</div>
+          <div class="text-amber-300/80 text-[11px] mt-0.5">${escapeHtml(action.description || '')}</div>
+        </div>
+        <button onclick="document.getElementById('${cardId}').remove()" class="text-gray-600 hover:text-gray-400 cursor-pointer shrink-0">✕</button>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap pt-1 border-t border-amber-800/40">
+        ${isDockerDown ? `
+          <button id="${cardId}-start-btn" onclick="aimRepairStartService('docker', '${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}', '${cardId}')"
+            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
+            <span>🐳</span> Servisi Başlat
+          </button>
+          <span class="text-gray-600 text-[10px]">veya terminalde: <code class="text-gray-400">${escapeHtml(action.startCmd || 'docker info')}</code></span>
+        ` : isMissingTool ? `
+          <button onclick="installSystemTool('${escapeHtml(action.installId || action.service)}', this)"
+            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600 hover:bg-amber-500 text-white cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
+            <span>⚡</span> Tek Tıkla Kur
+          </button>
+          <button onclick="aimRepairRetry('${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}')"
+            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
+            ↺ Tekrar Dene
+          </button>
+        ` : `
+          <button onclick="aimRepairRetry('${escapeHtml(stepId)}', '${escapeHtml(stepLabel)}')"
+            class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-700 hover:bg-gray-600 text-gray-200 cursor-pointer flex items-center gap-1.5">
+            ↺ Tekrar Dene
+          </button>
+        `}
+        <button onclick="aimSkipRepairAndContinue('${cardId}')"
+          class="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-800 hover:bg-gray-700 text-gray-400 cursor-pointer transition-all">
+          ⏭ Atla & Devam Et
+        </button>
+      </div>
+    `;
+
+    const term = document.getElementById('aim-terminal');
+    if (term) {
+      term.appendChild(card);
+      term.scrollTop = term.scrollHeight;
+      if (window.lucide) lucide.createIcons();
+    }
+  });
 }
+
+// Start a downed service via SSE and auto-retry the step when ready
+async function aimRepairStartService(service, retryStepId, retryStepLabel, cardId) {
+  const card = document.getElementById(cardId);
+  const startBtn = document.getElementById(cardId + '-start-btn');
+  if (startBtn) { startBtn.disabled = true; startBtn.textContent = '⏳ Başlatılıyor...'; }
+  aimTerminalAppend(`\n🔄 ${service} başlatılıyor, lütfen bekleyin...`, 'text-blue-300 font-bold');
+
+  return new Promise((resolve) => {
+    const sse = new EventSource(`${API_BASE}/api/repair/start-service?_body=${encodeURIComponent(JSON.stringify({ service }))}`);
+    // We use fetch+SSE style via POST using a small helper:
+    sse.close(); // close immediately — we'll use fetch with ReadableStream
+
+    fetch(`${API_BASE}/api/repair/start-service`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ service }),
+    }).then(res => {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      function pump() {
+        reader.read().then(({ done, value }) => {
+          if (done) { resolve(); return; }
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop();
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              aimTerminalAppend(line.slice(6));
+            } else if (line.startsWith('event: service-ready')) {
+              // Service is up — remove card and retry step
+              setTimeout(() => {
+                if (card) card.remove();
+                aimTerminalAppend(`\n✅ ${service} hazır! Adım yeniden çalıştırılıyor...`, 'text-emerald-400 font-bold');
+                runSingleInstallStep(retryStepId, retryStepLabel);
+                // Resume pipeline
+                if (_aimRunningPipeline) _continueAimPipeline();
+              }, 500);
+              resolve();
+              return;
+            } else if (line.startsWith('event: service-failed')) {
+              aimTerminalAppend(`❌ ${service} başlatılamadı. Manuel olarak başlatın ve tekrar deneyin.`, 'text-red-400');
+              if (startBtn) { startBtn.disabled = false; startBtn.textContent = '🔄 Tekrar Dene'; }
+              resolve();
+              return;
+            }
+          }
+          pump();
+        });
+      }
+      pump();
+    }).catch(err => {
+      aimTerminalAppend('❌ Onarım bağlantısı kurulamadı: ' + err.message, 'text-red-400');
+      resolve();
+    });
+  });
+}
+
+function aimRepairRetry(stepId, stepLabel) {
+  runSingleInstallStep(stepId, stepLabel);
+}
+
+function aimSkipRepairAndContinue(cardId) {
+  const card = document.getElementById(cardId);
+  if (card) card.remove();
+  aimTerminalAppend('⏭ Atlandı — pipeline devam ediyor...', 'text-gray-500');
+  _continueAimPipeline();
+}
+
 
 function _continueAimPipeline() {
   if (!_aimRunningPipeline || _aimPipelineQueue.length === 0) {

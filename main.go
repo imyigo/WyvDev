@@ -2966,8 +2966,18 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 	if !commandExistsInEnv(toolName, getEnhancedEnv()) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		fmt.Fprintf(w, "data: ❌ '%s' bulunamadı. Sistem & Teşhis sayfasından kurabilirsiniz.\n\n", toolName)
-		fmt.Fprintf(w, "event: error\ndata: missing-tool:%s\n\n", toolName)
+		fmt.Fprintf(w, "data: ❌ '%s' bulunamadı.\n\n", toolName)
+		// Structured repair-action event — missing tool can be installed from System & Diagnostics
+		payload, _ := json.Marshal(map[string]interface{}{
+			"type":        "missing-tool",
+			"service":     toolName,
+			"title":       fmt.Sprintf("'%s' Kurulu Değil", toolName),
+			"description": fmt.Sprintf("%s bulunamadı. Sistem & Teşhis sayfasından tek tıkla kurabilirsiniz.", toolName),
+			"installId":   toolName,
+			"retryStepId": stepID,
+			"canRetry":    true,
+		})
+		fmt.Fprintf(w, "event: repair-action\ndata: %s\n\n", string(payload))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -2985,18 +2995,26 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			fmt.Fprintf(w, "data: ❌ Docker daemon çalışmıyor.\n\n")
-			fmt.Fprintf(w, "data: Terminalde 'docker info' komutunu çalıştırarak kontrol edebilirsiniz.\n\n")
-			fmt.Fprintf(w, "data: (Docker Engine, Colima, OrbStack, Podman veya herhangi bir daemon çalışıyor olmalı)\n\n")
 			if len(out) > 0 {
-				fmt.Fprintf(w, "data: Hata: %s\n\n", strings.TrimSpace(string(out)))
+				fmt.Fprintf(w, "data: %s\n\n", strings.TrimSpace(string(out)))
 			}
-			fmt.Fprintf(w, "event: error\ndata: docker-daemon-not-running\n\n")
+			// Structured repair-action event so the UI can show a one-click fix card
+			startCmd := repairStartCmd("docker")
+			payload, _ := json.Marshal(map[string]interface{}{
+				"type":        "service-down",
+				"service":     "docker",
+				"title":       "Docker Daemon Çalışmıyor",
+				"description": "Docker Engine, Colima, OrbStack veya Podman gibi bir daemon aktif olmalı.",
+				"startCmd":    startCmd,
+				"retryStepId": stepID,
+				"canRetry":    true,
+			})
+			fmt.Fprintf(w, "event: repair-action\ndata: %s\n\n", string(payload))
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 			return
 		} else {
-			// Log which docker version was found
 			_ = out
 		}
 	}
@@ -5115,6 +5133,112 @@ func buildInstallCmds() map[string]installCmdDef {
 	}
 }
 
+// repairStartCmd returns the best command to start a service on the current OS.
+func repairStartCmd(service string) string {
+	switch service {
+	case "docker":
+		switch runtime.GOOS {
+		case "windows":
+			return "Start-Service com.docker.service"
+		case "darwin":
+			return "open -a Docker"
+		default:
+			return "sudo systemctl start docker"
+		}
+	default:
+		return ""
+	}
+}
+
+// handleRepairStartService tries to start a known service (e.g. docker) and
+// streams back SSE progress so the UI can show a live status and retry.
+func handleRepairStartService(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Service string `json:"service"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Service == "" {
+		writeErr(w, 400, "service gerekli")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	flusher, _ := w.(http.Flusher)
+
+	send := func(msg string) {
+		fmt.Fprintf(w, "data: %s\n\n", msg)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	switch body.Service {
+	case "docker":
+		send("🔄 Docker daemon başlatılıyor...")
+
+		var startCmd *exec.Cmd
+		ctx := r.Context()
+		switch runtime.GOOS {
+		case "windows":
+			// Try wsl --exec dockerd first, fall back to net start
+			send("💡 Windows: Docker Engine başlatılıyor (wsl/dockerd)...")
+			startCmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command",
+				`Start-Service -Name "com.docker.service" -ErrorAction SilentlyContinue; Start-Sleep 2; docker info --format "{{.ServerVersion}}"`)
+		case "darwin":
+			send("💡 macOS: Docker.app açılıyor...")
+			startCmd = exec.CommandContext(ctx, "open", "-a", "Docker")
+		default:
+			send("💡 Linux: systemctl docker başlatılıyor...")
+			startCmd = exec.CommandContext(ctx, "sudo", "systemctl", "start", "docker")
+		}
+
+		out, err := startCmd.CombinedOutput()
+		if len(out) > 0 {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				if strings.TrimSpace(line) != "" {
+					send(line)
+				}
+			}
+		}
+		if err != nil {
+			send("⏳ Daemon başlatma komutu çalıştı, daemon hazır olana kadar bekleniyor...")
+		}
+
+		// Poll up to 30s for docker daemon to become reachable
+		deadline := time.Now().Add(30 * time.Second)
+		ready := false
+		for time.Now().Before(deadline) {
+			time.Sleep(2 * time.Second)
+			check := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+			if checkOut, checkErr := check.CombinedOutput(); checkErr == nil {
+				ver := strings.TrimSpace(string(checkOut))
+				send(fmt.Sprintf("✅ Docker hazır! Sürüm: %s", ver))
+				ready = true
+				break
+			}
+			send("⏳ Docker daemon bekleniyor...")
+		}
+
+		if ready {
+			fmt.Fprintf(w, "event: service-ready\ndata: docker\n\n")
+		} else {
+			send("❌ Docker daemon 30 saniye içinde başlatılamadı.")
+			fmt.Fprintf(w, "event: service-failed\ndata: docker\n\n")
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+
+	default:
+		send(fmt.Sprintf("❌ Bilinmeyen servis: %s", body.Service))
+		fmt.Fprintf(w, "event: service-failed\ndata: %s\n\n", body.Service)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
 func handleSystemInstall(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID string `json:"id"`
@@ -5825,6 +5949,7 @@ func runServer() {
 	mux.HandleFunc("POST /api/skills/install", handleSkillInstall)
 	mux.HandleFunc("GET /api/ide/import-preview", handleIdeImportPreview)
 	mux.HandleFunc("POST /api/ide/import", handleIdeImport)
+	mux.HandleFunc("POST /api/repair/start-service", handleRepairStartService)
 	mux.Handle("/", http.FileServer(http.Dir(baseDir)))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", defaultPort)
