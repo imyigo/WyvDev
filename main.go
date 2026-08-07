@@ -4490,6 +4490,10 @@ func scanRepoFolder(name string) ScanEntry {
 		entry.MissingTool = ""
 		entry.LocalCommand = ""
 		entry.LocalArgs = nil
+	} else if entry.RepoType == "mcp" {
+		entry.RunStrategy = "mcp-stdio"
+		entry.RunMode = ""
+		entry.MissingTool = ""
 	}
 
 	if strat.RunCommand != "" && (entry.StartCommand == "" || entry.StartCommand == "docker run") {
@@ -4775,6 +4779,19 @@ func handleReposScan(w http.ResponseWriter, r *http.Request) {
 			entry.GitCommit = strings.TrimSpace(string(cmOut))
 		}
 		commitCancel()
+
+		// Local git status check (fast 500ms timeout for untracked/dirty status)
+		if entry.GitBranch != "" && entry.GitStatus == "" {
+			stCtx, stCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			if stOut, stErr := exec.CommandContext(stCtx, "git", "-C", dir, "status", "--porcelain").Output(); stErr == nil {
+				if len(bytes.TrimSpace(stOut)) > 0 {
+					entry.GitStatus = "uncommitted"
+				} else {
+					entry.GitStatus = "upToDate"
+				}
+			}
+			stCancel()
+		}
 
 		// Folder mtime
 		if fi, fiErr := os.Stat(dir); fiErr == nil {

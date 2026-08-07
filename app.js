@@ -2295,16 +2295,21 @@ function importState(file) {
 }
 
 function statusToBadge(status) {
-  if (!status || status === 'upToDate') {
+  if (!status || status === 'upToDate' || status === 'up-to-date') {
     return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">✓ Güncel</span>`;
   }
   if (status.startsWith('behind')) {
-    return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">⏳ Geride (${status.split(':')[1]})</span>`;
+    const count = status.split(':')[1] || '';
+    return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">⏳ Geride ${count ? '(' + count + ')' : ''}</span>`;
   }
   if (status.startsWith('ahead')) {
-    return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">↑ İlerde (${status.split(':')[1]})</span>`;
+    const count = status.split(':')[1] || '';
+    return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">↑ İlerde ${count ? '(' + count + ')' : ''}</span>`;
   }
-  return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30">⚠️ ${status}</span>`;
+  if (status === 'uncommitted' || status === 'dirty') {
+    return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30" title="Yerel değiştirilmiş dosyalar var">⚠️ Yerel Değişiklik</span>`;
+  }
+  return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30">⚠️ ${escapeHtml(status)}</span>`;
 }
 
 async function renderTrackedRepos() {
@@ -2872,6 +2877,8 @@ function renderLibraryScan() {
 
   function statusBadge(entry) {
     const strategy = entry.runStrategy || entry.runMode || '';
+    const repoType = entry.repoType || (entry.looksLikeMcp ? 'mcp' : (entry.hasSkill ? 'skill' : ''));
+
     if (entry.isRunning) {
       const portTxt = entry.runningPort ? `Port: ${entry.runningPort}` : (entry.port ? `Port: ${entry.port}` : 'Aktif');
       return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">🟢 Çalışıyor (${portTxt})</span>`;
@@ -2879,22 +2886,44 @@ function renderLibraryScan() {
     if (entry.hasStartError) {
       return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-red-500/15 text-red-400 border border-red-500/30" title="${escapeHtml(entry.startErrorMsg || '')}">⚠️ Çalıştırma Hatası</span>`;
     }
+
+    // Skills: instructions/markdown — never built or npm-installed
+    if (repoType === 'skill' || strategy === 'skill-only') {
+      const isAdded = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+      return isAdded
+        ? `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">✓ Skill Etkin</span>`
+        : `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">✓ Skill Hazır</span>`;
+    }
+
+    // MCP Servers: stdio / IDE config integrations
+    if (repoType === 'mcp' || strategy === 'mcp-stdio') {
+      const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
+      return matchedMcp
+        ? `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">🔌 MCP Ekli</span>`
+        : `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-400 border border-cyan-500/30">🔌 MCP Hazır</span>`;
+    }
+
     if (entry.missingTool) {
       return `<button onclick="goToSystemDiagnostics('${entry.missingTool}')" title="Sistem & Teşhis sayfasına git" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 cursor-pointer hover:bg-amber-500/25">⚠️ ${escapeHtml(entry.missingTool)} kurulu değil</button>`;
     }
+
     if (entry.isInstalled) {
-      // For docker mode, show image built; for compose show 'Hazır'
       const label = (strategy === 'docker') ? '✓ Image Hazır' : (strategy === 'compose' ? '✓ Compose Hazır' : '✓ Hazır');
       return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">${label}</span>`;
     }
-    // strategy-aware install-needed badge — skip for library/skill-only
-    if (strategy && strategy !== 'library' && strategy !== 'skill-only' && strategy !== '') {
-      const label = (strategy === 'docker') ? '🐳 Build Gerekli'
-        : (strategy === 'compose') ? '🐳 Compose Çalıştır'
-        : '⚠️ Kurulum Gerekli';
-      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">${label}</span>`;
+
+    // Strategy-aware install/build needed badge for Service / App repos
+    if (strategy === 'docker') {
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">🐳 Build Gerekli</span>`;
     }
-    return '';
+    if (strategy === 'compose') {
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 border border-blue-500/30">🐳 Compose Çalıştır</span>`;
+    }
+    if (strategy === 'local') {
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">⚠️ Kurulum Gerekli</span>`;
+    }
+
+    return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700">✓ Hazır</span>`;
   }
 
   function primaryActionButton(entry, extraClass) {
@@ -2935,10 +2964,10 @@ function renderLibraryScan() {
     const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
     const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
 
-    // Her grup yalnızca kendi aksiyonunu gösterir
-    const isMcpGroup   = groupKey === 'mcp';
-    const isSkillGroup = groupKey === 'skill';
-    const isServiceGroup = groupKey === 'service' || groupKey === 'other' || !groupKey;
+    // Her grup veya repo turu yalnizca kendi aksiyonunu gosterir
+    const isMcpGroup   = groupKey === 'mcp' || entry.repoType === 'mcp' || entry.looksLikeMcp;
+    const isSkillGroup = groupKey === 'skill' || entry.repoType === 'skill' || entry.hasSkill;
+    const isServiceGroup = !isMcpGroup && !isSkillGroup;
 
     const secondary = [];
 
@@ -3013,9 +3042,10 @@ function renderLibraryScan() {
     const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
     const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
 
-    const isMcpGroup   = groupKey === 'mcp';
-    const isSkillGroup = groupKey === 'skill';
-    const isServiceGroup = groupKey === 'service' || groupKey === 'other' || !groupKey;
+    // Gruplama ve aksiyon belirleme: repo'nun kenti turu her zaman gecerli
+    const isMcpGroup   = groupKey === 'mcp' || entry.repoType === 'mcp' || entry.looksLikeMcp;
+    const isSkillGroup = groupKey === 'skill' || entry.repoType === 'skill' || entry.hasSkill;
+    const isServiceGroup = !isMcpGroup && !isSkillGroup;
 
     return `
       <div class="glass-card flex flex-col justify-between space-y-3.5 relative overflow-hidden ${entry.isRunning ? 'border-emerald-500/50 bg-emerald-950/10' : ''} ${entry.pinned ? 'border-indigo-500/40 bg-indigo-950/10' : ''}">
@@ -3036,6 +3066,7 @@ function renderLibraryScan() {
           </div>
           <div class="flex items-center gap-1.5 flex-wrap">
             ${statusBadge(entry)}
+            ${entry.gitStatus ? statusToBadge(entry.gitStatus) : ''}
             ${primaryRuntimeBadge(entry)}
             ${entry.gitBranch ? `<span class="text-[10px] font-mono text-gray-600 flex items-center gap-0.5"><i data-lucide="git-branch" class="w-2.5 h-2.5"></i>${escapeHtml(entry.gitBranch)}${entry.gitCommit ? ' · ' + escapeHtml(entry.gitCommit) : ''}</span>` : ''}
             ${entry.diskSizeMB > 0 ? `<span class="text-[10px] text-gray-600">💾 ${entry.diskSizeMB}MB</span>` : ''}
