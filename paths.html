@@ -107,45 +107,6 @@
     <!-- Main View -->
     <main class="main-content">
       <div class="space-y-6">
-        <!-- Master IDE Mirror Sync Control Panel -->
-        <div class="bg-gradient-to-r from-amber-500/10 via-indigo-500/10 to-purple-500/10 p-4 rounded-2xl border border-amber-500/20 shadow-xl space-y-3">
-          <div class="flex items-center justify-between flex-wrap gap-3">
-            <div class="flex items-center gap-3">
-              <div class="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-300 shadow-inner">
-                <i data-lucide="crown" class="w-5 h-5"></i>
-              </div>
-              <div>
-                <div class="flex items-center gap-2">
-                  <h2 class="font-bold text-sm text-gray-100">Ana IDE Senkronizasyonu (Single Source of Truth)</h2>
-                  <span class="master-ide-info-badge text-[10px] font-extrabold px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                    👑 Yükleniyor...
-                  </span>
-                </div>
-                <p class="text-xs text-gray-400 mt-0.5">Seçilen Ana IDE üzerindeki MCP ve Skill'ler diğer tüm IDE'lere doğrudan aktarılır (Direct Write).</p>
-              </div>
-            </div>
-
-            <div class="flex items-center gap-2 flex-wrap">
-              <div class="flex items-center gap-1.5 bg-gray-950/80 px-3 py-1.5 rounded-xl border border-amber-500/30">
-                <span class="text-xs text-amber-300 font-bold flex items-center gap-1"><i data-lucide="crown" class="w-3.5 h-3.5"></i> Ana IDE:</span>
-                <select class="master-ide-select bg-transparent text-xs text-gray-100 font-semibold focus:outline-none cursor-pointer" onchange="changeMasterIde(this.value)">
-                  <option value="cursor">Cursor IDE</option>
-                </select>
-              </div>
-
-              <button onclick="openDiffModal()" title="Master IDE ile hedef IDE'ler arasındaki farkları aktarmadan önce inceleyin" class="px-3.5 py-2 rounded-xl text-xs font-semibold bg-gray-900/90 hover:bg-gray-800 text-amber-300 border border-amber-500/30 flex items-center gap-1.5 cursor-pointer shadow-lg transition-all active:scale-95">
-                <i data-lucide="git-compare" class="w-3.5 h-3.5"></i>
-                <span>🔍 Diff Önizle</span>
-              </button>
-
-              <button onclick="syncMasterIdeToAll(this)" title="Ana IDE'deki tüm MCP ve Skill'leri diğer tüm IDE'lerin diskteki konfigürasyonlarına doğrudan yazar" class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-500 to-indigo-600 hover:from-amber-400 hover:to-indigo-500 text-white flex items-center gap-2 cursor-pointer shadow-lg shadow-amber-500/10 transition-all active:scale-95">
-                <i data-lucide="sparkles" class="w-4 h-4 text-amber-200"></i>
-                <span>⚡ Master → Tüm IDE'lere Aktar</span>
-              </button>
-            </div>
-          </div>
-        </div>
-
         <div class="bg-gray-900/40 p-4 rounded-2xl border border-gray-800 flex items-center justify-between flex-wrap gap-3">
           <div>
             <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
@@ -192,40 +153,6 @@
           <button onclick="downloadJsonFile()" class="px-3 py-2 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer">
             İndir
           </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Modal 3: Visual Diff Modal -->
-  <div id="diff-modal" class="modal-overlay hidden">
-    <div class="modal-content max-w-3xl">
-      <div class="flex items-center justify-between border-b border-gray-800 pb-3">
-        <h3 class="font-bold text-sm text-amber-300 flex items-center gap-2">
-          <i data-lucide="git-compare" class="w-4 h-4"></i> Master IDE Visual Diff (Aktarım Önizlemesi)
-        </h3>
-        <button onclick="closeDiffModal()" class="text-gray-400 hover:text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>
-      </div>
-
-      <div class="space-y-4 py-2">
-        <div class="flex items-center justify-between text-xs text-gray-400 bg-gray-950/60 p-3 rounded-xl border border-gray-800">
-          <div>
-            <span class="font-semibold text-gray-200">Kaynak (Master IDE):</span>
-            <span id="diff-master-name" class="font-mono text-amber-300 font-bold ml-1">Cursor IDE</span>
-          </div>
-          <p class="text-[11px] text-gray-400">Aktarım yapıldığında aşağıdaki hedef IDE'ler bu güncel MCP ve Skill kümesiyle senkronize edilecek.</p>
-        </div>
-
-        <div id="diff-results-container" class="space-y-3 max-h-96 overflow-y-auto pr-1">
-          <div class="py-8 text-center text-gray-400"><i data-lucide="loader-2" class="w-6 h-6 animate-spin mx-auto text-amber-400 mb-2"></i> Farklar hesaplanıyor...</div>
-        </div>
-      </div>
-
-      <div class="flex items-center justify-between border-t border-gray-800 pt-3">
-        <p class="text-xs text-gray-400"><span class="text-emerald-400 font-bold">+ Eklenecekler</span>, <span class="text-indigo-300 font-bold">✓ Mevcutlar</span>, <span class="text-red-400 font-bold">- Silinecekler</span></p>
-        <div class="flex items-center gap-2">
-          <button onclick="closeDiffModal()" class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-gray-800 hover:bg-gray-700 text-gray-300 cursor-pointer">Kapat</button>
-          <button onclick="closeDiffModal(); syncMasterIdeToAll(null);" class="px-4 py-1.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-gray-950 cursor-pointer shadow-lg">⚡ Şimdi Aktar</button>
         </div>
       </div>
     </div>
