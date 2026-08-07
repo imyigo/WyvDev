@@ -285,14 +285,42 @@ type LoopEngineConfig struct {
 	CacheStrategy   string `json:"cacheStrategy"`
 }
 
+// AutoInstallConfig controls the background auto-install worker.
+type AutoInstallConfig struct {
+	Enabled            bool     `json:"enabled"`
+	TriggerOnClone     bool     `json:"triggerOnClone"`     // run after git clone
+	TriggerOnScan      bool     `json:"triggerOnScan"`      // run after manual scan
+	TriggerOnStart     bool     `json:"triggerOnStart"`     // run before app start
+	OnlyRequired       bool     `json:"onlyRequired"`       // skip optional steps (e.g. npm run build)
+	EnabledRuntimes    []string `json:"enabledRuntimes"`    // e.g. ["node","python","rust","go","docker","composer","gem","maven","gradle","make"]
+	TimeoutPerStep     int      `json:"timeoutPerStep"`     // seconds, default 300
+	OnError            string   `json:"onError"`            // "continue" | "stop" | "repair"
+	AllowShellScripts  bool     `json:"allowShellScripts"`  // install.sh / setup.sh — disabled by default
+}
+
+func defaultAutoInstallConfig() AutoInstallConfig {
+	return AutoInstallConfig{
+		Enabled:         false,
+		TriggerOnClone:  true,
+		TriggerOnScan:   true,
+		TriggerOnStart:  false,
+		OnlyRequired:    true,
+		EnabledRuntimes: []string{"node", "python", "rust", "go", "docker", "composer"},
+		TimeoutPerStep:  300,
+		OnError:         "continue",
+		AllowShellScripts: false,
+	}
+}
+
 type StateBundle struct {
-	MasterIDE        string           `json:"masterIde,omitempty"`
-	McpServers       []MCPEntry       `json:"mcpServers"`
-	RecommendedRepos []SkillEntry     `json:"recommendedRepos"`
-	IdePaths         []IdePathEntry   `json:"idePaths"`
-	TrackedRepos     []TrackedRepo    `json:"trackedRepos"`
-	DeletedIdeIDs    []string         `json:"deletedIdeIds,omitempty"`
-	LoopConfig       LoopEngineConfig `json:"loopConfig,omitempty"`
+	MasterIDE         string            `json:"masterIde,omitempty"`
+	McpServers        []MCPEntry        `json:"mcpServers"`
+	RecommendedRepos  []SkillEntry      `json:"recommendedRepos"`
+	IdePaths          []IdePathEntry    `json:"idePaths"`
+	TrackedRepos      []TrackedRepo     `json:"trackedRepos"`
+	DeletedIdeIDs     []string          `json:"deletedIdeIds,omitempty"`
+	LoopConfig        LoopEngineConfig  `json:"loopConfig,omitempty"`
+	AutoInstall       AutoInstallConfig `json:"autoInstall,omitempty"`
 }
 
 // ---------- Path helpers (AI_TOOLKIT_TEST_HOME lets tests point at a scratch dir) ----------
@@ -1011,6 +1039,11 @@ func autoCloneMissingRepos(s *StateBundle) []map[string]interface{} {
 				})
 				tracked[repoRef] = true
 				changed = true
+			}
+			// Trigger auto-install if enabled and triggerOnClone is set
+			if s.AutoInstall.Enabled && s.AutoInstall.TriggerOnClone {
+				cfg := s.AutoInstall
+				go runAutoInstallForRepo(name, cfg)
 			}
 		}
 		results = append(results, result)
@@ -2379,10 +2412,86 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// --- PHP Composer ---
+	composerJson := filepath.Join(dir, "composer.json")
+	if _, err := os.Stat(composerJson); err == nil {
+		runtimeSet["composer"] = true
+		vendorDir := filepath.Join(dir, "vendor")
+		if _, err := os.Stat(vendorDir); err != nil {
+			result.MissingFiles = append(result.MissingFiles, "vendor/")
+			steps = append(steps, InstallStep{ID: "composer-install", Label: "composer install", Cmd: "composer install --no-interaction", Required: true})
+		} else {
+			result.InstalledDeps++
+		}
+	}
+
+	// --- Ruby Gems ---
+	gemfile := filepath.Join(dir, "Gemfile")
+	if _, err := os.Stat(gemfile); err == nil {
+		runtimeSet["gem"] = true
+		gemLock := filepath.Join(dir, "Gemfile.lock")
+		bundleDir := filepath.Join(dir, ".bundle")
+		if _, err1 := os.Stat(gemLock); err1 != nil {
+			if _, err2 := os.Stat(bundleDir); err2 != nil {
+				result.MissingFiles = append(result.MissingFiles, ".bundle/")
+				steps = append(steps, InstallStep{ID: "bundle-install", Label: "bundle install", Cmd: "bundle install", Required: true})
+			}
+		} else {
+			result.InstalledDeps++
+		}
+	}
+
+	// --- Java Maven ---
+	pomXml := filepath.Join(dir, "pom.xml")
+	if _, err := os.Stat(pomXml); err == nil {
+		runtimeSet["maven"] = true
+		targetDir := filepath.Join(dir, "target")
+		if _, err := os.Stat(targetDir); err != nil {
+			result.MissingFiles = append(result.MissingFiles, "target/")
+			steps = append(steps, InstallStep{ID: "mvn-install", Label: "mvn install -DskipTests", Cmd: "mvn install -DskipTests", Required: true})
+		} else {
+			result.InstalledDeps++
+		}
+		result.DiskEstimateMB += 100
+	}
+
+	// --- Java Gradle ---
+	buildGradle := filepath.Join(dir, "build.gradle")
+	buildGradleKts := filepath.Join(dir, "build.gradle.kts")
+	if _, err1 := os.Stat(buildGradle); err1 == nil {
+		runtimeSet["gradle"] = true
+		buildDir := filepath.Join(dir, "build")
+		if _, err := os.Stat(buildDir); err != nil {
+			result.MissingFiles = append(result.MissingFiles, "build/")
+			steps = append(steps, InstallStep{ID: "gradle-build", Label: "gradle build", Cmd: "gradle build", Required: true})
+		} else {
+			result.InstalledDeps++
+		}
+	} else if _, err2 := os.Stat(buildGradleKts); err2 == nil {
+		runtimeSet["gradle"] = true
+		steps = append(steps, InstallStep{ID: "gradle-build", Label: "gradle build", Cmd: "gradle build", Required: true})
+	}
+
 	// --- Makefile ---
 	makefile := filepath.Join(dir, "Makefile")
 	if _, err := os.Stat(makefile); err == nil {
 		result.HasMakefile = true
+		// Check if Makefile has an 'install' target
+		if data, err := os.ReadFile(makefile); err == nil {
+			if strings.Contains(string(data), "\ninstall:") || strings.HasPrefix(string(data), "install:") {
+				steps = append(steps, InstallStep{ID: "make-install", Label: "make install", Cmd: "make install", Required: false})
+			}
+		}
+	}
+
+	// --- Shell Script (install.sh / setup.sh) — only if explicitly allowed ---
+	// Note: disabled by default in AutoInstallConfig.AllowShellScripts for security
+	for _, scriptName := range []string{"install.sh", "setup.sh", "bootstrap.sh"} {
+		scriptPath := filepath.Join(dir, scriptName)
+		if _, err := os.Stat(scriptPath); err == nil {
+			steps = append(steps, InstallStep{ID: "shell-" + strings.TrimSuffix(scriptName, ".sh"), Label: "bash " + scriptName, Cmd: "bash " + scriptName, Required: false})
+			break
+		}
 	}
 
 	// --- ENV variables ---
@@ -2471,7 +2580,36 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 	case "docker-build":
 		toolName, args = "docker", []string{"build", "-t", safeTag, "."}
 	case "compose-up":
-		toolName, args = "docker", []string{"compose", "up", "-d"}
+		toolName, args = "docker", []string{"compose", "up", "-d", "--build"}
+	case "composer-install":
+		toolName, args = "composer", []string{"install", "--no-interaction"}
+	case "bundle-install":
+		toolName, args = "bundle", []string{"install"}
+	case "mvn-install":
+		toolName, args = "mvn", []string{"install", "-DskipTests"}
+	case "gradle-build":
+		toolName, args = "gradle", []string{"build"}
+	case "make-install":
+		toolName, args = "make", []string{"install"}
+	case "shell-install", "shell-setup", "shell-bootstrap":
+		// Shell scripts — only allowed if AutoInstallConfig.AllowShellScripts is true
+		// The frontend enforces this; we double-check here
+		scriptMap := map[string]string{
+			"shell-install":   "install.sh",
+			"shell-setup":     "setup.sh",
+			"shell-bootstrap": "bootstrap.sh",
+		}
+		scriptFile := scriptMap[stepID]
+		scriptPath := filepath.Join(dir, scriptFile)
+		if _, err := os.Stat(scriptPath); err != nil {
+			http.Error(w, scriptFile+" bulunamadı", 404)
+			return
+		}
+		if runtime.GOOS == "windows" {
+			toolName, args = "bash", []string{scriptFile}
+		} else {
+			toolName, args = "bash", []string{scriptFile}
+		}
 	case "copy-env":
 		// Special: just copy .env.example to .env
 		src := filepath.Join(dir, ".env.example")
@@ -2596,6 +2734,369 @@ func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+
+// ---------- Auto Install Engine ----------
+
+var autoInstallRunning sync.Map // repoName → bool (prevents duplicate runs)
+
+func handleAutoInstallConfig(w http.ResponseWriter, r *http.Request) {
+	s, err := loadState()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		cfg := s.AutoInstall
+		// Return defaults if never saved
+		if cfg.TimeoutPerStep == 0 {
+			cfg = defaultAutoInstallConfig()
+		}
+		writeJSON(w, 200, cfg)
+	case http.MethodPost:
+		var cfg AutoInstallConfig
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			writeErr(w, 400, "geçersiz JSON: "+err.Error())
+			return
+		}
+		if cfg.TimeoutPerStep <= 0 {
+			cfg.TimeoutPerStep = 300
+		}
+		s.AutoInstall = cfg
+		if err := saveState(s); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]interface{}{"ok": true})
+	default:
+		writeErr(w, 405, "method not allowed")
+	}
+}
+
+// handleAutoInstallScan scans all repos and queues install for those not yet installed.
+func handleAutoInstallScan(w http.ResponseWriter, r *http.Request) {
+	s, err := loadState()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	cfg := s.AutoInstall
+	if cfg.TimeoutPerStep == 0 {
+		cfg = defaultAutoInstallConfig()
+	}
+
+	baseDir := getBaseDir()
+	repoDir := filepath.Join(baseDir, "repo")
+	entries, err := os.ReadDir(repoDir)
+	if err != nil {
+		writeErr(w, 500, "repo/ klasörü okunamadı: "+err.Error())
+		return
+	}
+
+	queued := []string{}
+	skipped := []string{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if _, running := autoInstallRunning.Load(name); running {
+			skipped = append(skipped, name+" (zaten çalışıyor)")
+			continue
+		}
+		go runAutoInstallForRepo(name, cfg)
+		queued = append(queued, name)
+	}
+
+	logActivity("auto-install-scan", fmt.Sprintf("%d repo kuyruğa alındı, %d atlandı", len(queued), len(skipped)))
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":      true,
+		"queued":  queued,
+		"skipped": skipped,
+	})
+}
+
+// runAutoInstallForRepo analyzes a single repo and runs all required install steps.
+// Respects AutoInstallConfig: enabled runtimes, onlyRequired, timeout, error handling.
+func runAutoInstallForRepo(name string, cfg AutoInstallConfig) {
+	if _, loaded := autoInstallRunning.LoadOrStore(name, true); loaded {
+		return // already running
+	}
+	defer autoInstallRunning.Delete(name)
+
+	baseDir := getBaseDir()
+	dir := filepath.Join(baseDir, "repo", name)
+	if _, err := os.Stat(dir); err != nil {
+		return
+	}
+
+	logActivity("auto-install-start", fmt.Sprintf("%s bağımlılık analizi başlıyor...", name))
+
+	// Build a temporary HTTP request to reuse handleRepoAnalyze logic inline
+	// We call the analyze logic directly by re-running the detection
+	analysis := analyzeRepoDir(name, dir)
+	if len(analysis.InstallSteps) == 0 {
+		logActivity("auto-install-skip", fmt.Sprintf("%s: kurulum adımı bulunamadı (zaten hazır?)", name))
+		return
+	}
+
+	// Filter steps by enabled runtimes and onlyRequired
+	enabledSet := map[string]bool{}
+	for _, rt := range cfg.EnabledRuntimes {
+		enabledSet[rt] = true
+	}
+
+	runtimeForStep := map[string]string{
+		"npm-install": "node", "npm-build": "node",
+		"pip-install": "python", "pip-install-pyproject": "python", "pip-repair": "python",
+		"cargo-build": "rust",
+		"go-build": "go",
+		"docker-build": "docker", "docker-run": "docker", "compose-up": "docker",
+		"composer-install": "composer",
+		"bundle-install": "gem",
+		"mvn-install": "maven",
+		"gradle-build": "gradle",
+		"make-install": "make",
+		"shell-install": "shell", "shell-setup": "shell", "shell-bootstrap": "shell",
+		"copy-env": "all",
+	}
+
+	filteredSteps := []InstallStep{}
+	for _, step := range analysis.InstallSteps {
+		rt := runtimeForStep[step.ID]
+		if rt == "" {
+			rt = "all"
+		}
+		// Shell scripts: only if explicitly allowed
+		if (rt == "shell") && !cfg.AllowShellScripts {
+			continue
+		}
+		// Runtime must be enabled
+		if rt != "all" && !enabledSet[rt] {
+			continue
+		}
+		// Skip optional steps if onlyRequired
+		if cfg.OnlyRequired && !step.Required {
+			continue
+		}
+		filteredSteps = append(filteredSteps, step)
+	}
+
+	if len(filteredSteps) == 0 {
+		logActivity("auto-install-skip", fmt.Sprintf("%s: etkin runtime için kurulum adımı yok", name))
+		return
+	}
+
+	logActivity("auto-install-run", fmt.Sprintf("%s: %d adım çalıştırılıyor", name, len(filteredSteps)))
+
+	for _, step := range filteredSteps {
+		timeout := time.Duration(cfg.TimeoutPerStep) * time.Second
+		if timeout <= 0 {
+			timeout = 300 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+
+		err := runInstallStepBlocking(ctx, name, dir, step.ID)
+		cancel()
+
+		if err != nil {
+			logActivity("auto-install-error", fmt.Sprintf("%s [%s]: %v", name, step.Label, err))
+			switch cfg.OnError {
+			case "stop":
+				logActivity("auto-install-stop", fmt.Sprintf("%s: hata nedeniyle durduruldu", name))
+				return
+			case "repair":
+				// Try repair variant (e.g. npm install --force)
+				repairMap := map[string]string{
+					"npm-install":  "npm-repair",
+					"pip-install":  "pip-repair",
+					"cargo-build":  "cargo-repair",
+				}
+				if repairID, ok := repairMap[step.ID]; ok {
+					logActivity("auto-install-repair", fmt.Sprintf("%s: %s → onarma deneniyor (%s)", name, step.Label, repairID))
+					ctx2, cancel2 := context.WithTimeout(context.Background(), timeout)
+					_ = runInstallStepBlocking(ctx2, name, dir, repairID)
+					cancel2()
+				}
+			default: // "continue"
+				// continue to next step
+			}
+		} else {
+			logActivity("auto-install-ok", fmt.Sprintf("%s [%s]: ✅ tamamlandı", name, step.Label))
+		}
+	}
+
+	logActivity("auto-install-done", fmt.Sprintf("✅ %s kurulumu tamamlandı (%d adım)", name, len(filteredSteps)))
+
+	// Clear any start errors
+	repoStartErrorsMux.Lock()
+	delete(repoStartErrors, name)
+	repoStartErrorsMux.Unlock()
+}
+
+// analyzeRepoDir re-runs the same detection logic from handleRepoAnalyze without HTTP.
+func analyzeRepoDir(name, dir string) AnalyzeResult {
+	result := AnalyzeResult{Name: name}
+	runtimeSet := map[string]bool{}
+	steps := []InstallStep{}
+
+	type detector struct {
+		file string
+		fn   func()
+	}
+
+	// Node.js
+	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		runtimeSet["node"] = true
+		var pkg map[string]interface{}
+		if json.Unmarshal(data, &pkg) == nil {
+			count := 0
+			if d, ok := pkg["dependencies"].(map[string]interface{}); ok { count += len(d) }
+			if d, ok := pkg["devDependencies"].(map[string]interface{}); ok { count += len(d) }
+			result.TotalDeps += count
+		}
+		if _, err := os.Stat(filepath.Join(dir, "node_modules")); err != nil {
+			steps = append(steps, InstallStep{ID: "npm-install", Label: "npm install", Cmd: "npm install", Required: true})
+		}
+	}
+	// Python
+	if _, err := os.Stat(filepath.Join(dir, "requirements.txt")); err == nil {
+		runtimeSet["python"] = true
+		if _, e1 := os.Stat(filepath.Join(dir, "venv")); e1 != nil {
+			if _, e2 := os.Stat(filepath.Join(dir, ".venv")); e2 != nil {
+				steps = append(steps, InstallStep{ID: "pip-install", Label: "pip install -r requirements.txt", Cmd: "pip install -r requirements.txt", Required: true})
+			}
+		}
+	} else if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err == nil {
+		runtimeSet["python"] = true
+		steps = append(steps, InstallStep{ID: "pip-install-pyproject", Label: "pip install -e .", Cmd: "pip install -e .", Required: true})
+	}
+	// Rust
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
+		runtimeSet["rust"] = true
+		if _, err := os.Stat(filepath.Join(dir, "target", "release")); err != nil {
+			steps = append(steps, InstallStep{ID: "cargo-build", Label: "cargo build --release", Cmd: "cargo build --release", Required: true})
+		}
+	}
+	// Go
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		runtimeSet["go"] = true
+		steps = append(steps, InstallStep{ID: "go-build", Label: "go build ./...", Cmd: "go build ./...", Required: true})
+	}
+	// Docker
+	if _, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil {
+		runtimeSet["docker"] = true
+		steps = append(steps, InstallStep{ID: "docker-build", Label: "docker build", Cmd: "docker build -t " + name + " .", Required: true})
+	}
+	for _, cp := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml"} {
+		if _, err := os.Stat(filepath.Join(dir, cp)); err == nil {
+			steps = append(steps, InstallStep{ID: "compose-up", Label: "docker compose up -d", Cmd: "docker compose up -d", Required: true})
+			break
+		}
+	}
+	// PHP Composer
+	if _, err := os.Stat(filepath.Join(dir, "composer.json")); err == nil {
+		runtimeSet["composer"] = true
+		if _, err := os.Stat(filepath.Join(dir, "vendor")); err != nil {
+			steps = append(steps, InstallStep{ID: "composer-install", Label: "composer install", Cmd: "composer install --no-interaction", Required: true})
+		}
+	}
+	// Ruby
+	if _, err := os.Stat(filepath.Join(dir, "Gemfile")); err == nil {
+		runtimeSet["gem"] = true
+		if _, err := os.Stat(filepath.Join(dir, "Gemfile.lock")); err != nil {
+			steps = append(steps, InstallStep{ID: "bundle-install", Label: "bundle install", Cmd: "bundle install", Required: true})
+		}
+	}
+	// Maven
+	if _, err := os.Stat(filepath.Join(dir, "pom.xml")); err == nil {
+		runtimeSet["maven"] = true
+		if _, err := os.Stat(filepath.Join(dir, "target")); err != nil {
+			steps = append(steps, InstallStep{ID: "mvn-install", Label: "mvn install -DskipTests", Cmd: "mvn install -DskipTests", Required: true})
+		}
+	}
+	// Gradle
+	for _, gf := range []string{"build.gradle", "build.gradle.kts"} {
+		if _, err := os.Stat(filepath.Join(dir, gf)); err == nil {
+			runtimeSet["gradle"] = true
+			if _, err := os.Stat(filepath.Join(dir, "build")); err != nil {
+				steps = append(steps, InstallStep{ID: "gradle-build", Label: "gradle build", Cmd: "gradle build", Required: true})
+			}
+			break
+		}
+	}
+	// Shell scripts
+	for _, sf := range []string{"install.sh", "setup.sh", "bootstrap.sh"} {
+		if _, err := os.Stat(filepath.Join(dir, sf)); err == nil {
+			steps = append(steps, InstallStep{ID: "shell-" + strings.TrimSuffix(sf, ".sh"), Label: "bash " + sf, Cmd: "bash " + sf, Required: false})
+			break
+		}
+	}
+
+	for rt := range runtimeSet {
+		result.Runtimes = append(result.Runtimes, rt)
+	}
+	result.InstallSteps = steps
+	return result
+}
+
+// runInstallStepBlocking runs a single install step and waits for completion.
+func runInstallStepBlocking(ctx context.Context, repoName, dir, stepID string) error {
+	safeTag := "wyvdev-" + sanitizeDockerTag(repoName)
+	var toolName string
+	var args []string
+
+	switch stepID {
+	case "npm-install":
+		toolName, args = "npm", []string{"install"}
+	case "npm-build":
+		toolName, args = "npm", []string{"run", "build"}
+	case "npm-repair":
+		toolName, args = "npm", []string{"install", "--force"}
+	case "pip-install":
+		toolName, args = "pip", []string{"install", "-r", "requirements.txt"}
+	case "pip-install-pyproject":
+		toolName, args = "pip", []string{"install", "-e", "."}
+	case "pip-repair":
+		pyBin := "python"
+		if runtime.GOOS != "windows" { pyBin = "python3" }
+		toolName, args = pyBin, []string{"-m", "pip", "install", "--upgrade", "--force-reinstall", "-r", "requirements.txt"}
+	case "cargo-build":
+		toolName, args = "cargo", []string{"build", "--release"}
+	case "cargo-repair":
+		toolName, args = "cargo", []string{"clean"}
+	case "go-build":
+		toolName, args = "go", []string{"build", "./..."}
+	case "docker-build":
+		toolName, args = "docker", []string{"build", "-t", safeTag, "."}
+	case "compose-up":
+		toolName, args = "docker", []string{"compose", "up", "-d", "--build"}
+	case "composer-install":
+		toolName, args = "composer", []string{"install", "--no-interaction"}
+	case "bundle-install":
+		toolName, args = "bundle", []string{"install"}
+	case "mvn-install":
+		toolName, args = "mvn", []string{"install", "-DskipTests"}
+	case "gradle-build":
+		toolName, args = "gradle", []string{"build"}
+	case "make-install":
+		toolName, args = "make", []string{"install"}
+	default:
+		return fmt.Errorf("bilinmeyen adım: %s", stepID)
+	}
+
+	if !commandExistsInEnv(toolName, getEnhancedEnv()) {
+		return fmt.Errorf("'%s' bulunamadı", toolName)
+	}
+
+	cmd := enhancedCommand(ctx, toolName, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
 
 // ---------- real skill install (npx skills add ...) ----------
 
@@ -4836,6 +5337,9 @@ func runServer() {
 	mux.HandleFunc("GET /api/repos/{name}/env-vars", handleRepoEnvVars)
 	mux.HandleFunc("GET /api/repos/{name}/analyze", handleRepoAnalyze)
 	mux.HandleFunc("GET /api/repos/{name}/install/stream", handleRepoInstallStream)
+	mux.HandleFunc("GET /api/auto-install/config", handleAutoInstallConfig)
+	mux.HandleFunc("POST /api/auto-install/config", handleAutoInstallConfig)
+	mux.HandleFunc("POST /api/auto-install/scan", handleAutoInstallScan)
 	mux.HandleFunc("GET /api/repos/scan", handleReposScan)
 	mux.HandleFunc("POST /api/repos/check-all", handleCheckAllRepos)
 	mux.HandleFunc("GET /api/activity", handleActivity)

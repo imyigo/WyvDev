@@ -1533,6 +1533,156 @@ function resetToDefaultMcps() {
 }
 
 // Initial Render
+// ---------- Otomatik Kurulum Modu (Auto Install Mode) ----------
+
+async function loadAutoInstallConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/auto-install/config`);
+    if (!res.ok) return;
+    const cfg = await res.json();
+    applyAutoInstallConfigToUI(cfg);
+  } catch (e) {
+    // backend not reachable
+  }
+}
+
+function applyAutoInstallConfigToUI(cfg) {
+  const setCheck = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+  const setBadge = () => {
+    const badge = document.getElementById('aim-status-badge');
+    if (!badge) return;
+    const enabled = document.getElementById('aim-enabled')?.checked;
+    badge.textContent = enabled ? '● AKTİF' : '○ Pasif';
+    badge.className = `text-[10px] font-bold px-2.5 py-1 rounded-full border ${
+      enabled ? 'bg-purple-500/20 text-purple-300 border-purple-500/40' : 'bg-gray-700 text-gray-400 border-gray-600'
+    }`;
+    const sub = document.getElementById('aim-suboptions');
+    if (sub) {
+      sub.classList.toggle('opacity-50', !enabled);
+      sub.classList.toggle('pointer-events-none', !enabled);
+    }
+  };
+
+  setCheck('aim-enabled', cfg.enabled);
+  setCheck('aim-trigger-clone', cfg.triggerOnClone);
+  setCheck('aim-trigger-scan', cfg.triggerOnScan);
+  setCheck('aim-trigger-start', cfg.triggerOnStart);
+  setCheck('aim-only-required', cfg.onlyRequired);
+  setCheck('aim-allow-shell', cfg.allowShellScripts);
+
+  // Runtimes
+  const runtimes = cfg.enabledRuntimes || [];
+  document.querySelectorAll('.aim-runtime').forEach(el => {
+    el.checked = runtimes.includes(el.value);
+  });
+
+  // Timeout
+  const timeoutEl = document.getElementById('aim-timeout');
+  const timeoutVal = document.getElementById('aim-timeout-val');
+  if (timeoutEl && cfg.timeoutPerStep) {
+    timeoutEl.value = cfg.timeoutPerStep;
+    if (timeoutVal) timeoutVal.textContent = cfg.timeoutPerStep + ' sn';
+  }
+
+  // Error behavior
+  const onError = cfg.onError || 'continue';
+  document.querySelectorAll('input[name="aim-onerror"]').forEach(el => {
+    el.checked = el.value === onError;
+  });
+
+  setBadge();
+}
+
+function aimOnChange() {
+  const enabled = document.getElementById('aim-enabled')?.checked;
+  const badge = document.getElementById('aim-status-badge');
+  if (badge) {
+    badge.textContent = enabled ? '● AKTİF' : '○ Pasif';
+    badge.className = `text-[10px] font-bold px-2.5 py-1 rounded-full border ${
+      enabled ? 'bg-purple-500/20 text-purple-300 border-purple-500/40' : 'bg-gray-700 text-gray-400 border-gray-600'
+    }`;
+  }
+  const sub = document.getElementById('aim-suboptions');
+  if (sub) {
+    sub.classList.toggle('opacity-50', !enabled);
+    sub.classList.toggle('pointer-events-none', !enabled);
+  }
+}
+
+function readAutoInstallConfigFromUI() {
+  const getCheck = (id) => !!document.getElementById(id)?.checked;
+  const runtimes = [];
+  document.querySelectorAll('.aim-runtime:checked').forEach(el => runtimes.push(el.value));
+  const onError = document.querySelector('input[name="aim-onerror"]:checked')?.value || 'continue';
+  const timeout = parseInt(document.getElementById('aim-timeout')?.value || '300', 10);
+  return {
+    enabled: getCheck('aim-enabled'),
+    triggerOnClone: getCheck('aim-trigger-clone'),
+    triggerOnScan: getCheck('aim-trigger-scan'),
+    triggerOnStart: getCheck('aim-trigger-start'),
+    onlyRequired: getCheck('aim-only-required'),
+    allowShellScripts: getCheck('aim-allow-shell'),
+    enabledRuntimes: runtimes,
+    timeoutPerStep: timeout,
+    onError: onError,
+  };
+}
+
+async function saveAutoInstallConfig() {
+  const cfg = readAutoInstallConfigFromUI();
+  const fb = document.getElementById('aim-save-feedback');
+  try {
+    const res = await fetch(`${API_BASE}/api/auto-install/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      if (fb) { fb.textContent = '✅ Kaydedildi'; setTimeout(() => { if (fb) fb.textContent = ''; }, 3000); }
+      showToast('Otomatik Kurulum ayarları kaydedildi.');
+    } else {
+      if (fb) fb.textContent = '❌ Kayıt hatası';
+    }
+  } catch (e) {
+    if (fb) fb.textContent = '❌ Backend bağlantısı yok';
+  }
+}
+
+async function triggerAutoInstallScan(btnEl) {
+  const origHtml = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Taranıyor...';
+    if (window.lucide) lucide.createIcons();
+  }
+  const fb = document.getElementById('aim-save-feedback');
+  try {
+    const res = await fetch(`${API_BASE}/api/auto-install/scan`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      const count = (data.queued || []).length;
+      const msg = `✅ ${count} repo kuyruğa alındı. Kurulumlar arka planda devam ediyor — Aktivite Günlüğü'nden takip edin.`;
+      if (fb) { fb.textContent = msg; setTimeout(() => { if (fb) fb.textContent = ''; }, 6000); }
+      showToast(msg);
+    }
+  } catch (e) {
+    if (fb) fb.textContent = '❌ Backend bağlantısı yok';
+    showToast('Backend bağlantısı yok.');
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = origHtml;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+}
+
+// Auto-load on settings page
+if (document.getElementById('aim-enabled')) {
+  loadAutoInstallConfig();
+}
+
 // ---------- Ayarlar (settings.html): export/import + git repo tracking ----------
 
 async function exportState() {

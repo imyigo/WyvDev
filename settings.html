@@ -154,6 +154,105 @@
           </div>
         </div>
 
+        <!-- ⚡ Otomatik Kurulum Modu -->
+        <div class="bg-gray-900/40 p-4 rounded-2xl border border-purple-500/30 space-y-4">
+          <div class="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
+                <i data-lucide="package-2" class="w-4 h-4 text-purple-400"></i> ⚡ Otomatik Kurulum Modu
+              </h2>
+              <p class="text-xs text-gray-400 mt-0.5">Repo klonlandığında veya tarandığında bağımlılıkları otomatik olarak kur. Tüm dil ekosistemlerini destekler.</p>
+            </div>
+            <div class="flex items-center gap-3">
+              <span id="aim-status-badge" class="text-[10px] font-bold px-2.5 py-1 rounded-full bg-gray-700 text-gray-400 border border-gray-600">Yükleniyor...</span>
+            </div>
+          </div>
+
+          <!-- Main toggle -->
+          <div class="flex items-center justify-between p-3 rounded-xl bg-gray-950/60 border border-gray-800">
+            <div>
+              <div class="text-sm font-semibold text-white">Otomatik Kurulum</div>
+              <div class="text-[11px] text-gray-400">Açık olduğunda yeni repolar klonlanınca/taranınca otomatik kurulur</div>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" id="aim-enabled" class="sr-only peer" onchange="aimOnChange()">
+              <div class="w-11 h-6 bg-gray-700 peer-focus:ring-2 peer-focus:ring-purple-500 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+            </label>
+          </div>
+
+          <!-- Sub-options (only when enabled) -->
+          <div id="aim-suboptions" class="space-y-3 opacity-50 pointer-events-none transition-all">
+
+            <!-- Triggers -->
+            <div class="p-3 rounded-xl bg-gray-950/60 border border-gray-800 space-y-2">
+              <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Tetikleyiciler</div>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer"><input type="checkbox" id="aim-trigger-clone" class="rounded accent-purple-500"> Klonlama sonrası</label>
+                <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer"><input type="checkbox" id="aim-trigger-scan" class="rounded accent-purple-500"> Manuel tarama sonrası</label>
+                <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer"><input type="checkbox" id="aim-trigger-start" class="rounded accent-purple-500"> Başlatma öncesi</label>
+                <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer"><input type="checkbox" id="aim-only-required" class="rounded accent-purple-500"> Sadece zorunlu adımlar</label>
+              </div>
+            </div>
+
+            <!-- Runtime support -->
+            <div class="p-3 rounded-xl bg-gray-950/60 border border-gray-800 space-y-2">
+              <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Desteklenen Runtime'lar</div>
+              <div class="grid grid-cols-3 gap-2">
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-node" value="node" class="rounded accent-green-500 aim-runtime"> <span class="text-green-400">🟩 Node.js</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-python" value="python" class="rounded accent-yellow-500 aim-runtime"> <span class="text-yellow-400">🐍 Python</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-rust" value="rust" class="rounded accent-orange-500 aim-runtime"> <span class="text-orange-400">🦀 Rust</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-go" value="go" class="rounded accent-cyan-500 aim-runtime"> <span class="text-cyan-400">🐹 Go</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-docker" value="docker" class="rounded accent-blue-500 aim-runtime"> <span class="text-blue-400">🐳 Docker</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-composer" value="composer" class="rounded accent-indigo-500 aim-runtime"> <span class="text-indigo-400">🐘 PHP Composer</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-gem" value="gem" class="rounded accent-red-500 aim-runtime"> <span class="text-red-400">💎 Ruby Gems</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-maven" value="maven" class="rounded accent-orange-600 aim-runtime"> <span class="text-orange-500">☕ Maven</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-gradle" value="gradle" class="rounded accent-teal-500 aim-runtime"> <span class="text-teal-400">🐘 Gradle</span></label>
+                <label class="flex items-center gap-1.5 text-xs cursor-pointer"><input type="checkbox" id="aim-rt-make" value="make" class="rounded accent-gray-500 aim-runtime"> <span class="text-gray-400">⚙️ Makefile</span></label>
+              </div>
+              <!-- Shell scripts — warning -->
+              <div class="mt-2 pt-2 border-t border-gray-800">
+                <label class="flex items-start gap-2 text-xs cursor-pointer">
+                  <input type="checkbox" id="aim-allow-shell" class="rounded accent-red-500 mt-0.5">
+                  <span class="text-red-400">⚠️ Shell Script'lere İzin Ver <span class="text-gray-500">(install.sh / setup.sh — güvenlik riski, dikkatli kullanın)</span></span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Timeout + Error handling -->
+            <div class="grid grid-cols-2 gap-3">
+              <div class="p-3 rounded-xl bg-gray-950/60 border border-gray-800 space-y-2">
+                <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Zaman Aşımı (sn/adım)</div>
+                <div class="flex items-center gap-2">
+                  <input type="range" id="aim-timeout" min="30" max="900" step="30" value="300"
+                    oninput="document.getElementById('aim-timeout-val').textContent = this.value + ' sn'"
+                    class="flex-1 accent-purple-500">
+                  <span id="aim-timeout-val" class="text-xs font-mono text-purple-300 w-14 text-right">300 sn</span>
+                </div>
+              </div>
+              <div class="p-3 rounded-xl bg-gray-950/60 border border-gray-800 space-y-2">
+                <div class="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Hata Davranışı</div>
+                <div class="space-y-1">
+                  <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer"><input type="radio" name="aim-onerror" value="continue" class="accent-purple-500"> Devam et</label>
+                  <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer"><input type="radio" name="aim-onerror" value="stop" class="accent-purple-500"> Durdur</label>
+                  <label class="flex items-center gap-2 text-xs text-gray-300 cursor-pointer"><input type="radio" name="aim-onerror" value="repair" class="accent-purple-500"> Onar & Tekrar Dene</label>
+                </div>
+              </div>
+            </div>
+
+          </div><!-- /suboptions -->
+
+          <!-- Action buttons -->
+          <div class="flex items-center gap-2 pt-1 flex-wrap">
+            <button onclick="saveAutoInstallConfig()" class="px-4 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-500 text-white flex items-center gap-1.5 cursor-pointer shadow-lg transition-all active:scale-95">
+              <i data-lucide="save" class="w-3.5 h-3.5"></i> Ayarları Kaydet
+            </button>
+            <button onclick="triggerAutoInstallScan(this)" class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white flex items-center gap-1.5 cursor-pointer shadow-lg transition-all active:scale-95">
+              <i data-lucide="zap" class="w-3.5 h-3.5"></i> Hemen Tara & Kur
+            </button>
+            <span id="aim-save-feedback" class="text-xs text-gray-500"></span>
+          </div>
+        </div>
+
         <!-- Export/Import -->
         <div class="bg-gray-900/40 p-4 rounded-2xl border border-gray-800 space-y-3">
           <h2 class="font-semibold text-sm text-gray-100 flex items-center gap-2">
