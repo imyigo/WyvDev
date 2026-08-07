@@ -1769,22 +1769,32 @@ function renderLibraryScan() {
     const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
     const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
 
-    const showSkillAction = entry.hasSkill && (!groupKey || groupKey === 'skill');
-    const showMcpAction = (entry.looksLikeMcp || matchedMcp) && (!groupKey || groupKey === 'mcp');
-    const showPrimaryAction = !groupKey || groupKey === 'service';
+    // Her grup yalnızca kendi aksiyonunu gösterir
+    const isMcpGroup   = groupKey === 'mcp';
+    const isSkillGroup = groupKey === 'skill';
+    const isServiceGroup = groupKey === 'service' || groupKey === 'other' || !groupKey;
 
     const secondary = [];
-    if (showSkillAction) {
-      secondary.push(alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" title="Bu skill'i tespit edilen IDE'lere kopyalar" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer">Skill'i Etkinleştir</button>`);
-    }
-    if (showMcpAction) {
+
+    // 🔌 MCP grubu: sadece MCP yapılandır / düzenle / test
+    if (isMcpGroup) {
       secondary.push(matchedMcp
         ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" title="Değişkenlerini düzenle" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-cyan-900/60 text-cyan-300 border border-cyan-500/20 cursor-pointer flex items-center gap-1"><i data-lucide="sliders-horizontal" class="w-3 h-3"></i> MCP ekli — Düzenle</button>`
         : `<button onclick="addMcpFromScan(${i})" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-cyan-600 hover:bg-cyan-500 text-white cursor-pointer">MCP Yapılandır</button>`);
-      if (matchedMcp) {
-        secondary.push(`<button onclick="testMcpConnection('${matchedMcp.id}', this)" title="Bağlantıyı test et" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-500/20 cursor-pointer flex items-center gap-1"><i data-lucide="plug-zap" class="w-3 h-3"></i> Test</button>`);
-      }
+      if (matchedMcp) secondary.push(`<button onclick="testMcpConnection('${matchedMcp.id}', this)" title="Bağlantıyı test et" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-800 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-500/20 cursor-pointer flex items-center gap-1"><i data-lucide="plug-zap" class="w-3 h-3"></i> Test</button>`);
     }
+
+    // 📄 Skill grubu: sadece Skill Etkinleştir
+    if (isSkillGroup) {
+      secondary.push(alreadySkill
+        ? `<span class="text-[10px] text-emerald-500 flex items-center gap-1"><i data-lucide="check-circle" class="w-3 h-3"></i> Skill ekli</span>`
+        : `<button onclick="enableSkillToIdes('${entry.name}', this)" title="Bu skill'i tespit edilen IDE'lere kopyalar" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer">Skill'i Etkinleştir</button>`);
+    }
+
+    // ⚡ Servis / Uygulama grubu veya flat görünüm: Başlat / Kur
+    const primaryBtn = isServiceGroup ? primaryActionButton(entry) : '';
+
+    // 🔧 Her grupta ortak: git pull + sil
     if (entry.repo) secondary.push(`<button onclick="pullRepo('${entry.name}')" title="Güncelle (git pull)" class="p-1.5 rounded-lg text-gray-400 hover:text-cyan-300 hover:bg-cyan-500/10 cursor-pointer"><i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i></button>`);
     secondary.push(`<button onclick="deleteRepoFolder('${entry.name}')" title="Klasörü sil" class="p-1.5 rounded-lg text-gray-400 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>`);
 
@@ -1798,7 +1808,7 @@ function renderLibraryScan() {
         <td class="py-2.5 px-3 align-middle">${statusBadge(entry)}</td>
         <td class="py-2.5 px-3 text-right align-middle">
           <div class="flex items-center justify-end gap-1.5 flex-wrap">
-            ${showPrimaryAction ? primaryActionButton(entry) : ''}
+            ${primaryBtn}
             ${secondary.join('')}
           </div>
         </td>
@@ -1811,9 +1821,9 @@ function renderLibraryScan() {
     const alreadySkill = activeRecommendedRepos.some(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
     const matchedMcp = activeMcpServers.find(s => s.id === entry.name || (entry.repo && s.repo === entry.repo));
 
-    const showSkillAction = entry.hasSkill && (!groupKey || groupKey === 'skill');
-    const showMcpAction = (entry.looksLikeMcp || matchedMcp) && (!groupKey || groupKey === 'mcp');
-    const showPrimaryAction = !groupKey || groupKey === 'service';
+    const isMcpGroup   = groupKey === 'mcp';
+    const isSkillGroup = groupKey === 'skill';
+    const isServiceGroup = groupKey === 'service' || groupKey === 'other' || !groupKey;
 
     return `
       <div class="glass-card flex flex-col justify-between space-y-3.5 relative overflow-hidden ${entry.isRunning ? 'border-emerald-500/50 bg-emerald-950/10' : ''}">
@@ -1825,7 +1835,6 @@ function renderLibraryScan() {
             </div>
             <span class="text-[10px] font-bold px-2 py-0.5 rounded border shrink-0 ${typeStyle}">${escapeHtml(entry.repoTypeLabel || '📁 Diğer')}</span>
           </div>
-
           <div class="flex items-center gap-1.5 flex-wrap">
             ${statusBadge(entry)}
             ${primaryRuntimeBadge(entry)}
@@ -1833,12 +1842,21 @@ function renderLibraryScan() {
         </div>
 
         <div class="pt-2 border-t border-gray-800/80 space-y-2">
-          ${showPrimaryAction ? primaryActionButton(entry, 'w-full py-1.5 px-3 text-xs') : ''}
+          ${isServiceGroup ? primaryActionButton(entry, 'w-full py-1.5 px-3 text-xs') : ''}
 
           <div class="flex items-center justify-between text-[11px] pt-1 flex-wrap gap-1.5">
-            ${showSkillAction ? (alreadySkill ? `<span class="text-[10px] text-gray-500">Skill ekli</span>` : `<button onclick="enableSkillToIdes('${entry.name}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill Etkinleştir</button>`) : '<span></span>'}
-            ${showMcpAction ? (matchedMcp ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" class="text-cyan-400 hover:underline cursor-pointer font-semibold">MCP ekli — Düzenle</button>` : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`) : ''}
-            ${showMcpAction && matchedMcp ? `<button onclick="testMcpConnection('${matchedMcp.id}', this)" class="text-indigo-400 hover:underline cursor-pointer font-semibold">Test</button>` : ''}
+            ${isSkillGroup
+              ? (alreadySkill
+                  ? `<span class="text-[10px] text-emerald-500 flex items-center gap-1"><i data-lucide="check-circle" class="w-3 h-3"></i> Skill ekli</span>`
+                  : `<button onclick="enableSkillToIdes('${entry.name}', this)" class="text-emerald-400 hover:underline cursor-pointer font-semibold">+ Skill'i Etkinleştir</button>`)
+              : ''}
+            ${isMcpGroup
+              ? (matchedMcp
+                  ? `<button onclick="goToMcpConfig('${matchedMcp.id}')" class="text-cyan-400 hover:underline cursor-pointer font-semibold flex items-center gap-1"><i data-lucide="sliders-horizontal" class="w-3 h-3"></i> MCP ekli — Düzenle</button>`
+                  : `<button onclick="addMcpFromScan(${i})" class="text-cyan-400 hover:underline cursor-pointer font-semibold">+ MCP Yapılandır</button>`)
+              : ''}
+            ${isMcpGroup && matchedMcp ? `<button onclick="testMcpConnection('${matchedMcp.id}', this)" class="text-indigo-400 hover:underline cursor-pointer font-semibold">Test</button>` : ''}
+            ${entry.repo ? `<button onclick="pullRepo('${entry.name}')" title="git pull" class="text-gray-400 hover:text-cyan-300 cursor-pointer"><i data-lucide="refresh-cw" class="w-3 h-3"></i></button>` : ''}
             <button onclick="deleteRepoFolder('${entry.name}')" class="text-red-400 hover:underline cursor-pointer">Sil</button>
           </div>
         </div>
