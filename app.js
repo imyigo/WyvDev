@@ -1381,6 +1381,214 @@ function removeMcp(serverId) {
   }
 }
 
+// ============================================================
+// IDE → WyvDev MCP Import Modal
+// ============================================================
+
+let _iimCurrentIdeId = null;
+let _iimPreviewData  = null;
+
+const IDE_ICONS = {
+  'claude-desktop':   { icon: '🟣', color: 'text-purple-400' },
+  'claude-code':      { icon: '🔷', color: 'text-blue-400' },
+  'cursor':           { icon: '⚫', color: 'text-gray-200' },
+  'cursor-cline':     { icon: '⚫', color: 'text-gray-400' },
+  'vscode-cline':     { icon: '🔵', color: 'text-blue-400' },
+  'vscode-roo':       { icon: '🦘', color: 'text-emerald-400' },
+  'vscode-workspace': { icon: '📂', color: 'text-blue-300' },
+  'windsurf':         { icon: '🌊', color: 'text-cyan-400' },
+  'zed':              { icon: '⚡', color: 'text-yellow-400' },
+  'continue':         { icon: '▶', color: 'text-green-400' },
+  'jetbrains':        { icon: '🧠', color: 'text-orange-400' },
+  'antigravity-app':  { icon: '🚀', color: 'text-pink-400' },
+  'antigravity-global':{ icon: '🌐', color: 'text-pink-300' },
+  'universal-agents': { icon: '🤖', color: 'text-gray-300' },
+};
+
+async function openIdeImportModal() {
+  document.getElementById('ide-import-modal').classList.remove('hidden');
+  iimBackToSelect();
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    const res = await fetch(`${API_BASE}/api/ides/detect`);
+    const data = await res.json();
+    const ides = data.ides || [];
+    const list = document.getElementById('iim-ide-list');
+
+    if (!ides.length) {
+      list.innerHTML = '<p class="text-xs text-gray-500 col-span-2 text-center py-4">Hiç IDE tespit edilemedi.</p>';
+      return;
+    }
+
+    list.innerHTML = ides.map(ide => {
+      const meta = IDE_ICONS[ide.id] || { icon: '🖥️', color: 'text-gray-300' };
+      const detected = ide.detected;
+      return `
+        <button onclick="iimPickIde('${ide.id}', '${escapeHtml(ide.name)}')" ${!detected ? 'disabled title="Bu IDE tespit edilemedi"' : ''}
+          class="p-3 rounded-xl border text-left transition-all cursor-pointer group
+            ${detected
+              ? 'border-gray-700 bg-gray-900/60 hover:border-violet-500/60 hover:bg-violet-900/20'
+              : 'border-gray-800 bg-gray-900/30 opacity-40 cursor-not-allowed'}">
+          <div class="flex items-center gap-2">
+            <span class="text-lg">${meta.icon}</span>
+            <div class="flex-1 min-w-0">
+              <div class="font-semibold text-xs ${detected ? 'text-gray-100' : 'text-gray-500'} truncate">${escapeHtml(ide.name)}</div>
+              <div class="text-[10px] font-mono ${detected ? 'text-emerald-400' : 'text-gray-600'} truncate mt-0.5">
+                ${detected ? '✓ Tespit edildi' : '✗ Bulunamadı'}
+              </div>
+            </div>
+            ${detected ? '<i data-lucide="chevron-right" class="w-3.5 h-3.5 text-gray-600 group-hover:text-violet-400 shrink-0"></i>' : ''}
+          </div>
+        </button>
+      `;
+    }).join('');
+    if (window.lucide) lucide.createIcons();
+  } catch(e) {
+    document.getElementById('iim-ide-list').innerHTML = '<p class="text-xs text-red-400 col-span-2 text-center py-4">IDE listesi yüklenemedi.</p>';
+  }
+}
+
+async function iimPickIde(ideId, ideName) {
+  _iimCurrentIdeId = ideId;
+  const preview = document.getElementById('iim-step-preview');
+  const select  = document.getElementById('iim-step-select');
+  const footer  = document.getElementById('iim-footer');
+  const mcpList = document.getElementById('iim-mcp-list');
+  const badge   = document.getElementById('iim-preview-ide-badge');
+  const count   = document.getElementById('iim-preview-count');
+
+  select.classList.add('hidden');
+  preview.classList.remove('hidden');
+  preview.style.display = 'flex';
+  footer.classList.remove('hidden');
+  footer.style.display = 'flex';
+  badge.textContent = ideName;
+  mcpList.innerHTML = '<p class="text-xs text-gray-500 text-center py-6 flex items-center justify-center gap-2"><i data-lucide=\'loader-2\' class=\'w-4 h-4 animate-spin\'></i> MCP\'ler okunuyor...</p>';
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    const res = await fetch(`${API_BASE}/api/ide/import-preview?id=${encodeURIComponent(ideId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Önizleme yüklenemedi');
+    _iimPreviewData = data;
+    iimRenderPreview(data);
+  } catch(e) {
+    mcpList.innerHTML = `<p class="text-xs text-red-400 text-center py-6">❌ ${escapeHtml(e.message)}</p>`;
+    count.textContent = '';
+  }
+}
+
+function iimRenderPreview(data) {
+  const mcpList = document.getElementById('iim-mcp-list');
+  const count   = document.getElementById('iim-preview-count');
+  const conflictWarn  = document.getElementById('iim-conflict-warn');
+  const conflictCount = document.getElementById('iim-conflict-count');
+
+  count.textContent = `${data.total} MCP bulundu`;
+
+  if (data.conflict > 0) {
+    conflictWarn.classList.remove('hidden');
+    conflictCount.textContent = data.conflict;
+  } else {
+    conflictWarn.classList.add('hidden');
+  }
+
+  mcpList.innerHTML = (data.mcps || []).map(mcp => {
+    const cmdPreview = mcp.url
+      ? `🌐 ${mcp.url}`
+      : mcp.command
+        ? `⌨ ${mcp.command}${mcp.args?.length ? ' ' + mcp.args.join(' ') : ''}`
+        : '—';
+    const envCount = mcp.env ? Object.keys(mcp.env).length : 0;
+    return `
+      <label class="flex items-start gap-3 p-2.5 rounded-xl border border-gray-800 hover:border-violet-500/40 hover:bg-violet-900/10 cursor-pointer transition-all group">
+        <input type="checkbox" class="iim-mcp-cb mt-0.5 rounded border-gray-600 bg-gray-800 text-violet-500 cursor-pointer shrink-0" data-id="${escapeHtml(mcp.id)}" onchange="iimUpdateSelection()" ${mcp.conflict ? '' : 'checked'}>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-bold text-xs text-gray-100 truncate">${escapeHtml(mcp.id)}</span>
+            <span class="text-[9px] font-semibold px-1.5 py-0.5 rounded uppercase
+              ${mcp.type === 'http' ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-700 text-gray-300'}">
+              ${mcp.type}
+            </span>
+            ${mcp.conflict ? '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">⚠ Çakışıyor</span>' : '<span class="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">Yeni</span>'}
+            ${envCount > 0 ? `<span class="text-[9px] text-gray-500">${envCount} ENV var</span>` : ''}
+          </div>
+          <div class="text-[10px] font-mono text-gray-500 truncate mt-0.5" title="${escapeHtml(cmdPreview)}">${escapeHtml(cmdPreview.length > 60 ? cmdPreview.slice(0,60)+'…' : cmdPreview)}</div>
+        </div>
+      </label>
+    `;
+  }).join('');
+
+  iimUpdateSelection();
+  if (window.lucide) lucide.createIcons();
+}
+
+function iimSelectAll(checked) {
+  document.querySelectorAll('.iim-mcp-cb').forEach(cb => cb.checked = checked);
+  iimUpdateSelection();
+}
+
+function iimUpdateSelection() {
+  const checked = [...document.querySelectorAll('.iim-mcp-cb:checked')];
+  const selCount = document.getElementById('iim-selected-count');
+  const btn      = document.getElementById('iim-import-btn');
+  if (selCount) selCount.textContent = `${checked.length} seçili`;
+  if (btn) btn.disabled = checked.length === 0;
+}
+
+function iimBackToSelect() {
+  _iimCurrentIdeId = null;
+  _iimPreviewData  = null;
+  document.getElementById('iim-step-select').classList.remove('hidden');
+  const preview = document.getElementById('iim-step-preview');
+  preview.classList.add('hidden');
+  preview.style.display = '';
+  const footer = document.getElementById('iim-footer');
+  footer.classList.add('hidden');
+  footer.style.display = '';
+  document.getElementById('iim-conflict-warn').classList.add('hidden');
+}
+
+function closeIdeImportModal() {
+  document.getElementById('ide-import-modal').classList.add('hidden');
+  iimBackToSelect();
+}
+
+async function iimDoImport() {
+  if (!_iimCurrentIdeId) return;
+  const selectedIds = [...document.querySelectorAll('.iim-mcp-cb:checked')].map(cb => cb.dataset.id);
+  if (!selectedIds.length) return;
+
+  const overwrite = document.getElementById('iim-overwrite')?.checked || false;
+  const btn = document.getElementById('iim-import-btn');
+  const origHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i> İçe Aktarılıyor...';
+  if (window.lucide) lucide.createIcons();
+
+  try {
+    const res = await fetch(`${API_BASE}/api/ide/import`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ideId: _iimCurrentIdeId, ids: selectedIds, overwrite }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'İçe aktarım başarısız');
+
+    showToast(data.message || '✅ MCP\'ler içe aktarıldı!');
+    closeIdeImportModal();
+    // Refresh MCP list
+    if (typeof loadState === 'function') await loadState();
+    if (typeof renderMcpList === 'function') renderMcpList();
+  } catch(e) {
+    showToast('⚠️ İçe aktarım hatası: ' + e.message);
+    btn.disabled = false;
+    btn.innerHTML = origHtml;
+    if (window.lucide) lucide.createIcons();
+  }
+}
+
 function openAddMcpModal() {
   const modal = document.getElementById('add-mcp-modal');
   if (modal) modal.classList.remove('hidden');

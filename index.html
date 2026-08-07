@@ -36,6 +36,11 @@
 
       <span id="backend-status-pill" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 border border-red-500/30">🔴 Backend Bağlı Değil</span>
 
+      <button onclick="openIdeImportModal()" class="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white shadow-lg cursor-pointer transition-all active:scale-95">
+        <i data-lucide="download" class="w-4 h-4"></i>
+        <span>IDE'den İçe Aktar</span>
+      </button>
+
       <button onclick="openAddMcpModal()" class="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg cursor-pointer transition-all active:scale-95">
         <i data-lucide="plus-circle" class="w-4 h-4"></i>
         <span>Yeni MCP Ekle</span>
@@ -202,6 +207,70 @@
 
       </div>
     </main>
+  </div>
+
+  <!-- Modal: IDE'den MCP İçe Aktar -->
+  <div id="ide-import-modal" class="modal-overlay hidden" style="z-index:70;">
+    <div class="modal-content w-full max-w-2xl" style="max-height:90vh;display:flex;flex-direction:column;">
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-gray-800 pb-3 shrink-0">
+        <div class="flex items-center gap-2">
+          <i data-lucide="download" class="w-5 h-5 text-violet-400"></i>
+          <h3 class="font-bold text-base text-white">IDE'den MCP İçe Aktar</h3>
+          <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30">Beta</span>
+        </div>
+        <button onclick="closeIdeImportModal()" class="text-gray-400 hover:text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+
+      <!-- Step 1: IDE Seç -->
+      <div id="iim-step-select" class="py-4 space-y-3 shrink-0">
+        <p class="text-xs text-gray-400">Hangi IDE/uygulamadan MCP ayarlarını çekmek istiyorsunuz?</p>
+        <div id="iim-ide-list" class="grid grid-cols-2 gap-2">
+          <p class="text-xs text-gray-500 col-span-2 text-center py-4"><i data-lucide="loader-2" class="w-4 h-4 animate-spin inline mr-1"></i>IDE'ler tespit ediliyor...</p>
+        </div>
+      </div>
+
+      <!-- Step 2: MCP Önizleme -->
+      <div id="iim-step-preview" class="hidden flex-col flex-1 min-h-0 space-y-3">
+        <!-- Info bar -->
+        <div class="flex items-center justify-between shrink-0">
+          <div class="flex items-center gap-2">
+            <span id="iim-preview-ide-badge" class="text-xs font-bold px-2.5 py-1 rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30"></span>
+            <span id="iim-preview-count" class="text-xs text-gray-400"></span>
+          </div>
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+              <input type="checkbox" id="iim-overwrite" class="rounded border-gray-600 bg-gray-800 text-violet-500">
+              <span>Çakışanları üzerine yaz</span>
+            </label>
+            <button onclick="iimSelectAll(true)" class="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer">Tümünü Seç</button>
+            <span class="text-gray-700">·</span>
+            <button onclick="iimSelectAll(false)" class="text-[11px] text-gray-500 hover:text-gray-300 cursor-pointer">Temizle</button>
+          </div>
+        </div>
+
+        <!-- Conflict warning -->
+        <div id="iim-conflict-warn" class="hidden text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-2">
+          ⚠️ <span id="iim-conflict-count"></span> MCP zaten WyvDev'de kayıtlı. "Üzerine yaz" seçeneğini etkinleştirirseniz güncellenir, aksi hâlde atlanır.
+        </div>
+
+        <!-- MCP list -->
+        <div id="iim-mcp-list" class="flex-1 overflow-y-auto space-y-1.5 pr-1 min-h-0" style="max-height:340px;scrollbar-width:thin;"></div>
+      </div>
+
+      <!-- Footer -->
+      <div id="iim-footer" class="hidden border-t border-gray-800 pt-3 shrink-0 flex items-center justify-between gap-3">
+        <button onclick="iimBackToSelect()" class="text-xs text-gray-500 hover:text-gray-300 cursor-pointer flex items-center gap-1">
+          <i data-lucide="arrow-left" class="w-3.5 h-3.5"></i> Geri
+        </button>
+        <div class="flex items-center gap-2">
+          <span id="iim-selected-count" class="text-xs text-gray-400">0 seçili</span>
+          <button id="iim-import-btn" onclick="iimDoImport()" class="px-5 py-2 rounded-xl text-sm font-bold bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white flex items-center gap-2 cursor-pointer shadow-lg shadow-purple-500/20 transition-all active:scale-95" disabled>
+            <i data-lucide="download" class="w-4 h-4"></i> İçe Aktar
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Modal 1: JSON Editor -->

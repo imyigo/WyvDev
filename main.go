@@ -1318,6 +1318,258 @@ func handleStateMigrate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---------- IDE → WyvDev MCP Import ----------
+
+// handleIdeImportPreview reads an IDE's MCP config file and returns a preview
+// of the MCPs it contains, flagging which IDs already exist in WyvDev state.
+func handleIdeImportPreview(w http.ResponseWriter, r *http.Request) {
+	ideID := r.URL.Query().Get("id")
+	if ideID == "" {
+		writeErr(w, 400, "id parametresi gerekli")
+		return
+	}
+
+	// Find the IDE
+	ides := detectIdes()
+	var ide *DetectedIde
+	for i := range ides {
+		if ides[i].ID == ideID {
+			ide = &ides[i]
+			break
+		}
+	}
+	if ide == nil {
+		writeErr(w, 404, "IDE bulunamadı: "+ideID)
+		return
+	}
+	if ide.Path == "" {
+		writeErr(w, 422, "bu IDE için config dosyası yolu tanımlı değil")
+		return
+	}
+
+	data, err := os.ReadFile(ide.Path)
+	if err != nil {
+		writeErr(w, 404, fmt.Sprintf("Config dosyası okunamadı: %s — %v", ide.Path, err))
+		return
+	}
+
+	// Parse MCP config — try standard {"mcpServers":{...}} format first,
+	// then try Cline's {"mcpServers":[...]} array format,
+	// then try Claude Code's top-level map.
+	type ImportedMCP struct {
+		ID       string            `json:"id"`
+		Command  string            `json:"command,omitempty"`
+		Args     []string          `json:"args,omitempty"`
+		URL      string            `json:"url,omitempty"`
+		Env      map[string]string `json:"env,omitempty"`
+		Headers  map[string]string `json:"headers,omitempty"`
+		Cwd      string            `json:"cwd,omitempty"`
+		Type     string            `json:"type"`
+		Conflict bool              `json:"conflict"` // true if ID already in WyvDev
+	}
+
+	var preview []ImportedMCP
+
+	// Load current state to detect conflicts
+	s, _ := loadState()
+	existingIDs := map[string]bool{}
+	for _, m := range s.McpServers {
+		existingIDs[m.ID] = true
+	}
+
+	// Parse the file — handle {"mcpServers": {...}} (object)
+	var cfg struct {
+		McpServers json.RawMessage `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err == nil && len(cfg.McpServers) > 0 {
+		// Try object form: {"id": {command, args, ...}}
+		var objForm map[string]McpServerConfig
+		if json.Unmarshal(cfg.McpServers, &objForm) == nil {
+			for id, sc := range objForm {
+				t := "stdio"
+				if sc.URL != "" {
+					t = "http"
+				}
+				preview = append(preview, ImportedMCP{
+					ID: id, Command: sc.Command, Args: sc.Args,
+					URL: sc.URL, Env: sc.Env, Headers: sc.Headers, Cwd: sc.Cwd,
+					Type: t, Conflict: existingIDs[id],
+				})
+			}
+		}
+	}
+
+	// Claude Code ~/.claude.json has {"mcpServers": {...}} but nested under profile keys
+	if len(preview) == 0 {
+		var claudeJSON map[string]json.RawMessage
+		if json.Unmarshal(data, &claudeJSON) == nil {
+			if raw, ok := claudeJSON["mcpServers"]; ok {
+				var objForm map[string]McpServerConfig
+				if json.Unmarshal(raw, &objForm) == nil {
+					for id, sc := range objForm {
+						t := "stdio"
+						if sc.URL != "" {
+							t = "http"
+						}
+						preview = append(preview, ImportedMCP{
+							ID: id, Command: sc.Command, Args: sc.Args,
+							URL: sc.URL, Env: sc.Env, Cwd: sc.Cwd,
+							Type: t, Conflict: existingIDs[id],
+						})
+					}
+				}
+			}
+		}
+	}
+
+	if len(preview) == 0 {
+		writeErr(w, 422, "Config dosyasında tanınabilir MCP girişi bulunamadı")
+		return
+	}
+
+	// Sort by ID for stable ordering
+	sort.Slice(preview, func(i, j int) bool { return preview[i].ID < preview[j].ID })
+
+	conflictCount := 0
+	for _, p := range preview {
+		if p.Conflict {
+			conflictCount++
+		}
+	}
+
+	writeJSON(w, 200, map[string]interface{}{
+		"ide":      ide,
+		"mcps":     preview,
+		"total":    len(preview),
+		"conflict": conflictCount,
+	})
+}
+
+// handleIdeImport merges the selected MCPs from the IDE config into WyvDev state.
+// Body: { "ideId": "cursor", "ids": ["server1","server2"], "overwrite": false }
+func handleIdeImport(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IdeID     string   `json:"ideId"`
+		IDs       []string `json:"ids"`
+		Overwrite bool     `json:"overwrite"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.IdeID == "" {
+		writeErr(w, 400, "geçersiz istek — ideId ve ids gerekli")
+		return
+	}
+
+	// Find IDE
+	ides := detectIdes()
+	var ide *DetectedIde
+	for i := range ides {
+		if ides[i].ID == body.IdeID {
+			ide = &ides[i]
+			break
+		}
+	}
+	if ide == nil {
+		writeErr(w, 404, "IDE bulunamadı: "+body.IdeID)
+		return
+	}
+
+	data, err := os.ReadFile(ide.Path)
+	if err != nil {
+		writeErr(w, 404, "Config dosyası okunamadı: "+err.Error())
+		return
+	}
+
+	// Parse
+	var cfg struct {
+		McpServers json.RawMessage `json:"mcpServers"`
+	}
+	_ = json.Unmarshal(data, &cfg)
+	var servers map[string]McpServerConfig
+	_ = json.Unmarshal(cfg.McpServers, &servers)
+
+	if len(servers) == 0 {
+		writeErr(w, 422, "Config dosyasında MCP bulunamadı")
+		return
+	}
+
+	// Filter to requested IDs
+	selectedSet := map[string]bool{}
+	for _, id := range body.IDs {
+		selectedSet[id] = true
+	}
+
+	// Load state
+	s, err := loadState()
+	if err != nil {
+		writeErr(w, 500, "State yüklenemedi: "+err.Error())
+		return
+	}
+
+	existingIDX := map[string]int{}
+	for i, m := range s.McpServers {
+		existingIDX[m.ID] = i
+	}
+
+	added, skipped, overwritten := 0, 0, 0
+
+	for id, sc := range servers {
+		if len(selectedSet) > 0 && !selectedSet[id] {
+			continue
+		}
+		t := "stdio"
+		if sc.URL != "" {
+			t = "http"
+		}
+		entry := MCPEntry{
+			ID:      id,
+			Name:    id,
+			Type:    t,
+			Command: sc.Command,
+			Args:    sc.Args,
+			URL:     sc.URL,
+			Env:     sc.Env,
+			Headers: sc.Headers,
+			Cwd:     sc.Cwd,
+			Badge:   "IDE'den İçe Aktarıldı",
+		}
+		if idx, exists := existingIDX[id]; exists {
+			if body.Overwrite {
+				s.McpServers[idx] = entry
+				overwritten++
+			} else {
+				skipped++
+			}
+		} else {
+			s.McpServers = append(s.McpServers, entry)
+			added++
+		}
+	}
+
+	if err := saveState(s); err != nil {
+		writeErr(w, 500, "State kaydedilemedi: "+err.Error())
+		return
+	}
+
+	// Trigger background sync to all IDEs
+	go func() {
+		tmpl, _ := loadCoreTemplate()
+		for _, ide2 := range detectIdes() {
+			if ide2.Detected {
+				_, _ = syncToIde(ide2, tmpl)
+			}
+		}
+	}()
+
+	logActivity("ide-import", fmt.Sprintf("%s'den %d MCP içe aktarıldı (%d eklendi, %d atlandı, %d üzerine yazıldı)", ide.Name, added+overwritten, added, skipped, overwritten))
+
+	writeJSON(w, 200, map[string]interface{}{
+		"ok":          true,
+		"added":       added,
+		"skipped":     skipped,
+		"overwritten": overwritten,
+		"message":     fmt.Sprintf("✅ %d MCP eklendi, %d atlandı, %d güncellendi", added, skipped, overwritten),
+	})
+}
+
 func handleIdesDetect(w http.ResponseWriter, r *http.Request) {
 	resetAll := r.URL.Query().Get("reset") == "true"
 
@@ -5553,6 +5805,8 @@ func runServer() {
 	mux.HandleFunc("POST /api/loop/config", handleLoopConfig)
 	mux.HandleFunc("GET /api/github/search", handleGithubSearch)
 	mux.HandleFunc("POST /api/skills/install", handleSkillInstall)
+	mux.HandleFunc("GET /api/ide/import-preview", handleIdeImportPreview)
+	mux.HandleFunc("POST /api/ide/import", handleIdeImport)
 	mux.Handle("/", http.FileServer(http.Dir(baseDir)))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", defaultPort)
