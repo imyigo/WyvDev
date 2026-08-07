@@ -927,16 +927,301 @@ function showInstallResultModal(repo, command, output, ok, error) {
     showToast(ok ? `✅ '${repo}' kuruldu.` : `⚠️ '${repo}' kurulamadı: ${error || ''}`);
     return;
   }
-  document.getElementById('install-result-title').textContent = ok ? `✅ '${repo}' kuruldu` : `⚠️ '${repo}' kurulamadı`;
+  document.getElementById('install-result-title').innerHTML = `<i data-lucide="package" class="w-4 h-4"></i> ${ok ? `✅ '${repo}' kuruldu` : `⚠️ '${repo}' kurulamadı`}`;
   document.getElementById('install-result-command').textContent = command || '';
   document.getElementById('install-result-output').textContent = [output, error].filter(Boolean).join('\n\n') || '(çıktı yok)';
   modal.classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
 }
 
 function closeInstallResultModal() {
   const modal = document.getElementById('install-result-modal');
   if (modal) modal.classList.add('hidden');
 }
+
+// ============================================================
+// 🚀 GELİŞMİŞ KURULUM MERKEZİ
+// ============================================================
+
+let _aimCurrentRepo = null;
+let _aimAnalysis = null;
+let _aimStepStates = {};       // stepId → 'idle' | 'running' | 'done' | 'error'
+let _aimCurrentSSE = null;     // active EventSource
+let _aimPipelineQueue = [];    // steps waiting in pipeline
+let _aimRunningPipeline = false;
+
+const RUNTIME_META = {
+  node:   { icon: '🟩', label: 'Node.js',  color: 'text-green-400' },
+  python: { icon: '🐍', label: 'Python',   color: 'text-yellow-400' },
+  rust:   { icon: '🦀', label: 'Rust',     color: 'text-orange-400' },
+  go:     { icon: '🐹', label: 'Go',       color: 'text-cyan-400' },
+  docker: { icon: '🐳', label: 'Docker',   color: 'text-blue-400' },
+};
+
+async function showAdvancedInstallModal(repoName) {
+  _aimCurrentRepo = repoName;
+  _aimAnalysis = null;
+  _aimStepStates = {};
+  _aimPipelineQueue = [];
+  _aimRunningPipeline = false;
+  if (_aimCurrentSSE) { _aimCurrentSSE.close(); _aimCurrentSSE = null; }
+
+  const modal = document.getElementById('advanced-install-modal');
+  if (!modal) { showToast('Kurulum Merkezi modal bulunamadı.'); return; }
+
+  // Reset UI
+  document.getElementById('aim-repo-badge').textContent = repoName;
+  document.getElementById('aim-loading').classList.remove('hidden');
+  document.getElementById('aim-info').classList.add('hidden');
+  document.getElementById('aim-steps').innerHTML = '<div class="text-xs text-gray-600 italic">Analiz bekleniyor...</div>';
+  document.getElementById('aim-terminal').innerHTML = '<span class="text-gray-600 italic">Kurulum başlatmak için bir adım seçin...</span>';
+  document.getElementById('aim-status-text').textContent = '';
+  document.getElementById('aim-run-all-btn').disabled = false;
+  document.getElementById('aim-stop-btn').classList.add('hidden');
+
+  modal.classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
+
+  // Fetch analysis
+  try {
+    const res = await fetch(`${API_BASE}/api/repos/${encodeURIComponent(repoName)}/analyze`);
+    if (!res.ok) throw new Error(await res.text());
+    _aimAnalysis = await res.json();
+    renderAimAnalysis(_aimAnalysis);
+  } catch (e) {
+    document.getElementById('aim-loading').innerHTML =
+      `<div class="text-xs text-red-400 text-center">Analiz başarısız:<br>${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderAimAnalysis(a) {
+  document.getElementById('aim-loading').classList.add('hidden');
+  document.getElementById('aim-info').classList.remove('hidden');
+
+  // Runtimes
+  const rtContainer = document.getElementById('aim-runtimes');
+  if (a.runtimes && a.runtimes.length > 0) {
+    rtContainer.innerHTML = a.runtimes.map(rt => {
+      const m = RUNTIME_META[rt] || { icon: '⚙️', label: rt, color: 'text-gray-300' };
+      return `<div class="flex items-center gap-1.5 text-xs ${m.color}"><span>${m.icon}</span><span class="font-semibold">${m.label}</span></div>`;
+    }).join('');
+  } else {
+    rtContainer.innerHTML = '<div class="text-xs text-gray-600 italic">Tespit edilemedi</div>';
+  }
+
+  // Deps
+  document.getElementById('aim-deps').textContent =
+    a.totalDeps > 0 ? `${a.installedDeps} / ${a.totalDeps} kurulu` : 'Sayılabilir bağımlılık yok';
+  document.getElementById('aim-progress-bar').style.width = `${Math.min(a.installPercent, 100)}%`;
+  document.getElementById('aim-progress-label').textContent = `%${a.installPercent} kurulu`;
+
+  // Disk
+  if (a.diskEstimateMB > 0) {
+    document.getElementById('aim-disk-row').classList.remove('hidden');
+    document.getElementById('aim-disk').textContent = `~${a.diskEstimateMB} MB`;
+  }
+
+  // Port
+  if (a.portSuggestion > 0) {
+    document.getElementById('aim-port-row').classList.remove('hidden');
+    document.getElementById('aim-port').textContent = `:${a.portSuggestion}`;
+  }
+
+  // Extras
+  const extras = document.getElementById('aim-extras');
+  const extraItems = [];
+  if (a.hasDockerfile) extraItems.push(`<div class="text-[10px] text-blue-400 flex items-center gap-1">🐳 Dockerfile mevcut</div>`);
+  if (a.hasCompose)    extraItems.push(`<div class="text-[10px] text-blue-400 flex items-center gap-1">🐳 Compose mevcut</div>`);
+  if (a.hasMakefile)   extraItems.push(`<div class="text-[10px] text-gray-400 flex items-center gap-1">⚙️ Makefile mevcut</div>`);
+  extras.innerHTML = extraItems.join('');
+
+  // ENV
+  if (a.envVarsNeeded && a.envVarsNeeded.length > 0) {
+    document.getElementById('aim-env-section').classList.remove('hidden');
+    document.getElementById('aim-env-list').innerHTML = a.envVarsNeeded.map(k =>
+      `<div class="text-[10px] font-mono text-amber-400 truncate" title="${escapeHtml(k)}">${escapeHtml(k)}</div>`
+    ).join('');
+  }
+
+  // Steps
+  renderAimSteps(a.installSteps || []);
+}
+
+function renderAimSteps(steps) {
+  const container = document.getElementById('aim-steps');
+  if (!steps.length) {
+    container.innerHTML = '<div class="text-xs text-emerald-400">✅ Kurulum adımı gerekmiyor — zaten hazır!</div>';
+    return;
+  }
+
+  container.innerHTML = steps.map(step => {
+    const state = _aimStepStates[step.id] || 'idle';
+    const stateIcon = { idle: '⏳', running: '⚙️', done: '✅', error: '❌' }[state] || '⏳';
+    const stateCls  = { idle: 'border-gray-700 text-gray-300', running: 'border-indigo-500 text-indigo-200 bg-indigo-950/30', done: 'border-emerald-700 text-emerald-300 bg-emerald-950/20', error: 'border-red-700 text-red-300 bg-red-950/20' }[state] || 'border-gray-700 text-gray-300';
+    const badge = step.required
+      ? `<span class="text-[9px] px-1 py-0.5 rounded bg-rose-900/50 text-rose-300 border border-rose-700/50">Zorunlu</span>`
+      : `<span class="text-[9px] px-1 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700">Opsiyonel</span>`;
+    return `
+      <div class="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg border ${stateCls} transition-all">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="text-sm shrink-0">${stateIcon}</span>
+          <div class="min-w-0">
+            <div class="text-xs font-semibold truncate">${escapeHtml(step.label)}</div>
+            <div class="text-[10px] font-mono text-gray-500 truncate">${escapeHtml(step.cmd)}</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
+          ${badge}
+          ${state !== 'running' ? `<button onclick="runSingleInstallStep('${escapeHtml(step.id)}', '${escapeHtml(step.label)}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-gray-800 hover:bg-indigo-900/60 text-gray-300 hover:text-indigo-200 border border-gray-700 cursor-pointer transition-all">▶ Çalıştır</button>` : `<span class="text-[10px] text-indigo-400 animate-pulse">Çalışıyor...</span>`}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function aimTerminalAppend(text, cls = '') {
+  const term = document.getElementById('aim-terminal');
+  if (!term) return;
+  // Clear placeholder
+  const placeholder = term.querySelector('span.text-gray-600.italic');
+  if (placeholder) placeholder.remove();
+
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+
+  // Color error/warning lines
+  const lc = text.toLowerCase();
+  if (lc.includes('error') || lc.includes('❌') || lc.startsWith('err ')) {
+    line.className = 'text-red-400';
+  } else if (lc.includes('warn') || lc.includes('⚠️')) {
+    line.className = 'text-yellow-400';
+  } else if (lc.includes('✅') || lc.includes('done') || lc.includes('success')) {
+    line.className = 'text-emerald-400';
+  }
+
+  line.textContent = text;
+  term.appendChild(line);
+  term.scrollTop = term.scrollHeight;
+}
+
+function clearAimTerminal() {
+  const term = document.getElementById('aim-terminal');
+  if (term) term.innerHTML = '<span class="text-gray-600 italic">Terminal temizlendi.</span>';
+}
+
+function runSingleInstallStep(stepId, stepLabel) {
+  if (_aimCurrentSSE) {
+    _aimCurrentSSE.close();
+    _aimCurrentSSE = null;
+  }
+
+  _aimStepStates[stepId] = 'running';
+  if (_aimAnalysis) renderAimSteps(_aimAnalysis.installSteps);
+
+  const statusEl = document.getElementById('aim-status-text');
+  if (statusEl) statusEl.textContent = `⚙️ ${stepLabel} çalışıyor...`;
+
+  document.getElementById('aim-stop-btn').classList.remove('hidden');
+  document.getElementById('aim-run-all-btn').disabled = true;
+
+  aimTerminalAppend(`\n▶ Adım: ${stepLabel}`, 'text-indigo-300 font-bold');
+
+  const url = `${API_BASE}/api/repos/${encodeURIComponent(_aimCurrentRepo)}/install/stream?step=${encodeURIComponent(stepId)}`;
+  const sse = new EventSource(url);
+  _aimCurrentSSE = sse;
+
+  sse.onmessage = (e) => { aimTerminalAppend(e.data); };
+
+  sse.addEventListener('done', () => {
+    _aimStepStates[stepId] = 'done';
+    sse.close(); _aimCurrentSSE = null;
+    if (_aimAnalysis) renderAimSteps(_aimAnalysis.installSteps);
+    if (statusEl) statusEl.textContent = `✅ ${stepLabel} tamamlandı`;
+    document.getElementById('aim-stop-btn').classList.add('hidden');
+    document.getElementById('aim-run-all-btn').disabled = false;
+    // Continue pipeline if running
+    _continueAimPipeline();
+  });
+
+  sse.addEventListener('error', (e) => {
+    _aimStepStates[stepId] = 'error';
+    sse.close(); _aimCurrentSSE = null;
+    if (_aimAnalysis) renderAimSteps(_aimAnalysis.installSteps);
+    if (statusEl) statusEl.textContent = `❌ ${stepLabel} hata ile tamamlandı`;
+    document.getElementById('aim-stop-btn').classList.add('hidden');
+    document.getElementById('aim-run-all-btn').disabled = false;
+    _aimRunningPipeline = false;
+    _aimPipelineQueue = [];
+  });
+
+  sse.addEventListener('cancelled', () => {
+    _aimStepStates[stepId] = 'idle';
+    sse.close(); _aimCurrentSSE = null;
+    if (_aimAnalysis) renderAimSteps(_aimAnalysis.installSteps);
+    if (statusEl) statusEl.textContent = '⛔ Durduruldu';
+    document.getElementById('aim-stop-btn').classList.add('hidden');
+    document.getElementById('aim-run-all-btn').disabled = false;
+    _aimRunningPipeline = false;
+    _aimPipelineQueue = [];
+  });
+
+  sse.onerror = () => {
+    if (sse.readyState === EventSource.CLOSED) return;
+    _aimStepStates[stepId] = 'error';
+    sse.close(); _aimCurrentSSE = null;
+    aimTerminalAppend('❌ SSE bağlantısı koptu.', 'text-red-400');
+    if (_aimAnalysis) renderAimSteps(_aimAnalysis.installSteps);
+    document.getElementById('aim-stop-btn').classList.add('hidden');
+    document.getElementById('aim-run-all-btn').disabled = false;
+    _aimRunningPipeline = false;
+  };
+}
+
+function _continueAimPipeline() {
+  if (!_aimRunningPipeline || _aimPipelineQueue.length === 0) {
+    _aimRunningPipeline = false;
+    const statusEl = document.getElementById('aim-status-text');
+    if (statusEl && _aimPipelineQueue.length === 0 && _aimRunningPipeline === false) {
+      statusEl.textContent = '🎉 Tüm adımlar tamamlandı!';
+    }
+    return;
+  }
+  const next = _aimPipelineQueue.shift();
+  runSingleInstallStep(next.id, next.label);
+}
+
+function runAllInstallSteps() {
+  if (!_aimAnalysis || !_aimAnalysis.installSteps || _aimAnalysis.installSteps.length === 0) {
+    showToast('Kurulum adımı bulunamadı.');
+    return;
+  }
+  // Reset all states
+  _aimStepStates = {};
+  _aimPipelineQueue = [..._aimAnalysis.installSteps];
+  _aimRunningPipeline = true;
+  aimTerminalAppend('\n🚀 Pipeline başlatılıyor — tüm adımlar sırayla çalışacak', 'text-indigo-300 font-bold');
+  _continueAimPipeline();
+}
+
+function stopCurrentInstall() {
+  if (_aimCurrentSSE) {
+    _aimCurrentSSE.close();
+    _aimCurrentSSE = null;
+  }
+  _aimRunningPipeline = false;
+  _aimPipelineQueue = [];
+  aimTerminalAppend('⛔ Kullanıcı tarafından durduruldu.', 'text-red-400');
+  document.getElementById('aim-stop-btn').classList.add('hidden');
+  document.getElementById('aim-run-all-btn').disabled = false;
+  const statusEl = document.getElementById('aim-status-text');
+  if (statusEl) statusEl.textContent = '⛔ Durduruldu';
+}
+
+function closeAdvancedInstallModal() {
+  stopCurrentInstall();
+  const modal = document.getElementById('advanced-install-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
 
 function updateIdePath(pathId, newPath) {
   const target = activeIdePaths.find(p => p.id === pathId);
@@ -1748,10 +2033,10 @@ function renderLibraryScan() {
       return `<button onclick="startRepoProject('${entry.name}', this)" title="Çalıştır: ${escapeHtml(entry.startCommand || '')}" class="${cls} bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white"><i data-lucide="play" class="w-3.5 h-3.5 fill-current"></i> Başlat</button>`;
     }
     if (entry.runMode === 'docker') {
-      return `<button onclick="dockerInstallAndRun('${entry.name}', this)" class="${cls} bg-gradient-to-r from-blue-700 to-cyan-700 hover:from-blue-600 hover:to-cyan-600 text-white"><i data-lucide="container" class="w-3.5 h-3.5"></i> Docker ile Kur & Başlat</button>`;
+      return `<button onclick="showAdvancedInstallModal('${entry.name}')" class="${cls} bg-gradient-to-r from-blue-700 to-cyan-700 hover:from-blue-600 hover:to-cyan-600 text-white"><i data-lucide="package-2" class="w-3.5 h-3.5"></i> Kurulum Merkezi</button>`;
     }
     if (entry.runMode === 'local') {
-      return `<button onclick="installAndStart('${entry.name}', ${JSON.stringify(runtimes).replace(/"/g, '&quot;')}, this)" class="${cls} bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white"><i data-lucide="zap" class="w-3.5 h-3.5"></i> Kur & Başlat</button>`;
+      return `<button onclick="showAdvancedInstallModal('${entry.name}')" class="${cls} bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white"><i data-lucide="package-2" class="w-3.5 h-3.5"></i> Kurulum Merkezi</button>`;
     }
     return '';
   }

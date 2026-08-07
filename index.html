@@ -231,11 +231,13 @@
     </div>
   </div>
 
-  <!-- Modal 2: Skill Install Result -->
+  <!-- Modal 2: Gelişmiş Kurulum Merkezi -->
   <div id="install-result-modal" class="modal-overlay hidden">
     <div class="modal-content max-w-xl">
       <div class="flex items-center justify-between border-b border-gray-800 pb-3">
-        <h3 id="install-result-title" class="font-bold text-sm text-emerald-300 flex items-center gap-2">Kurulum Sonucu</h3>
+        <h3 id="install-result-title" class="font-bold text-sm text-emerald-300 flex items-center gap-2">
+          <i data-lucide="package" class="w-4 h-4"></i> Kurulum Sonucu
+        </h3>
         <button onclick="closeInstallResultModal()" class="text-gray-400 hover:text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>
       </div>
       <div class="space-y-1">
@@ -248,6 +250,106 @@
       </div>
       <div class="flex justify-end pt-2 border-t border-gray-800">
         <button onclick="closeInstallResultModal()" class="px-4 py-2 rounded-xl text-xs font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Kapat</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Gelişmiş Kurulum Merkezi -->
+  <div id="advanced-install-modal" class="modal-overlay hidden" style="z-index:60;">
+    <div class="modal-content w-full max-w-3xl" style="max-height:90vh;display:flex;flex-direction:column;">
+      <!-- Header -->
+      <div class="flex items-center justify-between border-b border-gray-800 pb-3 shrink-0">
+        <div class="flex items-center gap-2">
+          <i data-lucide="package-2" class="w-5 h-5 text-indigo-400"></i>
+          <h3 class="font-bold text-base text-white">Kurulum Merkezi</h3>
+          <span id="aim-repo-badge" class="text-[11px] font-mono px-2 py-0.5 rounded-full bg-gray-800 border border-gray-700 text-gray-300"></span>
+        </div>
+        <button onclick="closeAdvancedInstallModal()" class="text-gray-400 hover:text-white cursor-pointer"><i data-lucide="x" class="w-5 h-5"></i></button>
+      </div>
+
+      <!-- Body: two-column -->
+      <div class="flex gap-4 mt-4 overflow-hidden" style="flex:1;min-height:0;">
+
+        <!-- Left panel: analysis -->
+        <div class="w-56 shrink-0 space-y-3 overflow-y-auto pr-1" style="scrollbar-width:thin;">
+          <!-- Loading state -->
+          <div id="aim-loading" class="flex flex-col items-center justify-center py-8 gap-2 text-gray-500">
+            <i data-lucide="loader-2" class="w-6 h-6 animate-spin text-indigo-400"></i>
+            <span class="text-xs">Analiz ediliyor...</span>
+          </div>
+
+          <!-- Loaded state -->
+          <div id="aim-info" class="hidden space-y-3">
+            <!-- Runtimes -->
+            <div>
+              <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">Çalışma Ortamı</div>
+              <div id="aim-runtimes" class="space-y-1"></div>
+            </div>
+            <!-- Deps -->
+            <div>
+              <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1.5">Bağımlılıklar</div>
+              <div id="aim-deps" class="text-xs text-gray-300"></div>
+              <!-- Progress bar -->
+              <div class="mt-1.5 h-1.5 rounded-full bg-gray-800 overflow-hidden">
+                <div id="aim-progress-bar" class="h-full rounded-full bg-gradient-to-r from-indigo-500 to-emerald-500 transition-all duration-500" style="width:0%"></div>
+              </div>
+              <div id="aim-progress-label" class="text-[10px] text-gray-500 mt-0.5"></div>
+            </div>
+            <!-- Disk -->
+            <div id="aim-disk-row" class="hidden">
+              <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1">Tahmini Disk</div>
+              <div id="aim-disk" class="text-xs text-gray-300"></div>
+            </div>
+            <!-- Port -->
+            <div id="aim-port-row" class="hidden">
+              <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1">Tahmini Port</div>
+              <div id="aim-port" class="text-xs text-cyan-300 font-mono"></div>
+            </div>
+            <!-- Extras -->
+            <div id="aim-extras" class="space-y-1"></div>
+            <!-- ENV -->
+            <div id="aim-env-section" class="hidden">
+              <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-1">ENV Değişkenleri</div>
+              <div id="aim-env-list" class="space-y-1"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right panel: steps + terminal -->
+        <div class="flex-1 flex flex-col gap-3 min-w-0 overflow-hidden">
+          <!-- Steps -->
+          <div>
+            <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider mb-2">Kurulum Adımları</div>
+            <div id="aim-steps" class="space-y-1.5">
+              <div class="text-xs text-gray-600 italic">Analiz bekleniyor...</div>
+            </div>
+          </div>
+
+          <!-- Terminal -->
+          <div class="flex-1 flex flex-col min-h-0">
+            <div class="flex items-center justify-between mb-1.5">
+              <div class="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Terminal Çıktısı</div>
+              <button onclick="clearAimTerminal()" class="text-[10px] text-gray-600 hover:text-gray-400 cursor-pointer">Temizle</button>
+            </div>
+            <div id="aim-terminal" class="flex-1 bg-black/60 rounded-xl border border-gray-800 font-mono text-[11px] p-3 overflow-y-auto whitespace-pre-wrap break-all text-gray-300" style="min-height:140px;max-height:280px;">
+              <span class="text-gray-600 italic">Kurulum başlatmak için bir adım seçin...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="flex items-center justify-between pt-3 border-t border-gray-800 mt-3 shrink-0 gap-2 flex-wrap">
+        <div class="flex items-center gap-2">
+          <button id="aim-run-all-btn" onclick="runAllInstallSteps()" class="px-4 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white cursor-pointer flex items-center gap-1.5 transition-all active:scale-95">
+            <i data-lucide="zap" class="w-3.5 h-3.5"></i> Hepsini Kur
+          </button>
+          <button id="aim-stop-btn" onclick="stopCurrentInstall()" class="hidden px-3 py-2 rounded-xl text-xs font-bold bg-red-700 hover:bg-red-600 text-white cursor-pointer flex items-center gap-1.5">
+            <i data-lucide="square" class="w-3 h-3 fill-current"></i> Durdur
+          </button>
+        </div>
+        <div id="aim-status-text" class="text-[11px] text-gray-500"></div>
+        <button onclick="closeAdvancedInstallModal()" class="px-3 py-2 rounded-xl text-xs font-semibold bg-gray-800 hover:bg-gray-700 text-gray-200 cursor-pointer">Kapat</button>
       </div>
     </div>
   </div>

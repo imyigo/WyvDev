@@ -2218,6 +2218,385 @@ func handleRepoRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
+// ---------- Gelişmiş Kurulum: Bağımlılık Analizi ----------
+
+type InstallStep struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Cmd      string `json:"cmd"`
+	Required bool   `json:"required"`
+}
+
+type AnalyzeResult struct {
+	Name            string        `json:"name"`
+	Runtimes        []string      `json:"runtimes"`
+	TotalDeps       int           `json:"totalDeps"`
+	InstalledDeps   int           `json:"installedDeps"`
+	InstallPercent  int           `json:"installPercent"`
+	MissingFiles    []string      `json:"missingFiles"`
+	InstallSteps    []InstallStep `json:"installSteps"`
+	EnvVarsNeeded   []string      `json:"envVarsNeeded"`
+	PortSuggestion  int           `json:"portSuggestion"`
+	DiskEstimateMB  int           `json:"diskEstimateMB"`
+	HasDockerfile   bool          `json:"hasDockerfile"`
+	HasCompose      bool          `json:"hasCompose"`
+	HasMakefile     bool          `json:"hasMakefile"`
+}
+
+func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	dir := repoDir(name)
+	if _, err := os.Stat(dir); err != nil {
+		writeErr(w, 404, "yerel klasör yok")
+		return
+	}
+
+	result := AnalyzeResult{Name: name}
+	runtimeSet := map[string]bool{}
+	steps := []InstallStep{}
+
+	// --- Node.js ---
+	pkgJson := filepath.Join(dir, "package.json")
+	if data, err := os.ReadFile(pkgJson); err == nil {
+		runtimeSet["node"] = true
+		var pkg map[string]interface{}
+		if json.Unmarshal(data, &pkg) == nil {
+			count := 0
+			if deps, ok := pkg["dependencies"].(map[string]interface{}); ok {
+				count += len(deps)
+			}
+			if dev, ok := pkg["devDependencies"].(map[string]interface{}); ok {
+				count += len(dev)
+			}
+			result.TotalDeps += count
+			result.DiskEstimateMB += count / 5 // rough estimate ~200KB per package
+		}
+		nmDir := filepath.Join(dir, "node_modules")
+		if _, err := os.Stat(nmDir); err == nil {
+			result.InstalledDeps += result.TotalDeps
+		} else {
+			result.MissingFiles = append(result.MissingFiles, "node_modules")
+		}
+		steps = append(steps, InstallStep{ID: "npm-install", Label: "npm install", Cmd: "npm install", Required: true})
+
+		// Check for build scripts
+		if scripts, ok := pkg["scripts"].(map[string]interface{}); ok {
+			if _, hasBuild := scripts["build"]; hasBuild {
+				steps = append(steps, InstallStep{ID: "npm-build", Label: "npm run build", Cmd: "npm run build", Required: false})
+			}
+			// Detect common port patterns
+			if start, ok := scripts["start"].(string); ok {
+				if strings.Contains(start, "3000") {
+					result.PortSuggestion = 3000
+				} else if strings.Contains(start, "8080") {
+					result.PortSuggestion = 8080
+				}
+			}
+		}
+	}
+
+	// --- Python ---
+	reqTxt := filepath.Join(dir, "requirements.txt")
+	pyproject := filepath.Join(dir, "pyproject.toml")
+	if _, err := os.Stat(reqTxt); err == nil {
+		runtimeSet["python"] = true
+		if data, err := os.ReadFile(reqTxt); err == nil {
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			count := 0
+			for _, l := range lines {
+				l = strings.TrimSpace(l)
+				if l != "" && !strings.HasPrefix(l, "#") {
+					count++
+				}
+			}
+			result.TotalDeps += count
+			result.DiskEstimateMB += count * 2
+		}
+		venvDir := filepath.Join(dir, "venv")
+		venvDir2 := filepath.Join(dir, ".venv")
+		if _, err1 := os.Stat(venvDir); err1 == nil {
+			result.InstalledDeps += result.TotalDeps
+		} else if _, err2 := os.Stat(venvDir2); err2 == nil {
+			result.InstalledDeps += result.TotalDeps
+		} else {
+			result.MissingFiles = append(result.MissingFiles, "venv/")
+			steps = append(steps, InstallStep{ID: "pip-install", Label: "pip install -r requirements.txt", Cmd: "pip install -r requirements.txt", Required: true})
+		}
+	} else if _, err := os.Stat(pyproject); err == nil {
+		runtimeSet["python"] = true
+		steps = append(steps, InstallStep{ID: "pip-install-pyproject", Label: "pip install -e .", Cmd: "pip install -e .", Required: true})
+	}
+
+	// --- Rust / Cargo ---
+	cargoToml := filepath.Join(dir, "Cargo.toml")
+	if _, err := os.Stat(cargoToml); err == nil {
+		runtimeSet["rust"] = true
+		targetDir := filepath.Join(dir, "target", "release")
+		if _, err := os.Stat(targetDir); err == nil {
+			result.InstalledDeps++
+		} else {
+			result.MissingFiles = append(result.MissingFiles, "target/")
+			steps = append(steps, InstallStep{ID: "cargo-build", Label: "cargo build --release", Cmd: "cargo build --release", Required: true})
+		}
+		result.DiskEstimateMB += 200
+	}
+
+	// --- Go ---
+	goMod := filepath.Join(dir, "go.mod")
+	if data, err := os.ReadFile(goMod); err == nil {
+		runtimeSet["go"] = true
+		lines := strings.Split(string(data), "\n")
+		for _, l := range lines {
+			if strings.HasPrefix(strings.TrimSpace(l), "require") {
+				result.TotalDeps++
+			}
+		}
+		steps = append(steps, InstallStep{ID: "go-build", Label: "go build ./...", Cmd: "go build ./...", Required: true})
+	}
+
+	// --- Docker ---
+	dockerfile := filepath.Join(dir, "Dockerfile")
+	composePaths := []string{
+		filepath.Join(dir, "docker-compose.yml"),
+		filepath.Join(dir, "docker-compose.yaml"),
+		filepath.Join(dir, "compose.yml"),
+	}
+	if _, err := os.Stat(dockerfile); err == nil {
+		runtimeSet["docker"] = true
+		result.HasDockerfile = true
+		steps = append(steps, InstallStep{ID: "docker-build", Label: "docker build", Cmd: "docker build -t " + name + " .", Required: true})
+		steps = append(steps, InstallStep{ID: "docker-run", Label: "docker run", Cmd: "docker run --rm -d " + name, Required: false})
+	}
+	for _, cp := range composePaths {
+		if _, err := os.Stat(cp); err == nil {
+			result.HasCompose = true
+			steps = append(steps, InstallStep{ID: "compose-up", Label: "docker compose up -d", Cmd: "docker compose up -d", Required: true})
+			break
+		}
+	}
+
+	// --- Makefile ---
+	makefile := filepath.Join(dir, "Makefile")
+	if _, err := os.Stat(makefile); err == nil {
+		result.HasMakefile = true
+	}
+
+	// --- ENV variables ---
+	envExample := filepath.Join(dir, ".env.example")
+	envLocal := filepath.Join(dir, ".env")
+	if data, err := os.ReadFile(envExample); err == nil {
+		lines := strings.Split(string(data), "\n")
+		envMissing := []string{}
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if l == "" || strings.HasPrefix(l, "#") {
+				continue
+			}
+			parts := strings.SplitN(l, "=", 2)
+			key := strings.TrimSpace(parts[0])
+			val := ""
+			if len(parts) > 1 {
+				val = strings.TrimSpace(parts[1])
+			}
+			if val == "" && key != "" {
+				envMissing = append(envMissing, key)
+			}
+		}
+		if _, err := os.Stat(envLocal); err != nil {
+			result.EnvVarsNeeded = envMissing
+			if len(envMissing) > 0 {
+				steps = append(steps, InstallStep{ID: "copy-env", Label: "cp .env.example .env", Cmd: "cp .env.example .env", Required: false})
+			}
+		}
+	}
+
+	// Runtimes list
+	for rt := range runtimeSet {
+		result.Runtimes = append(result.Runtimes, rt)
+	}
+
+	// Install percentage
+	if result.TotalDeps > 0 {
+		result.InstallPercent = int(float64(result.InstalledDeps) / float64(result.TotalDeps) * 100)
+	} else if len(result.MissingFiles) == 0 && len(steps) == 0 {
+		result.InstallPercent = 100
+	}
+
+	result.InstallSteps = steps
+	writeJSON(w, 200, result)
+}
+
+// ---------- Gelişmiş Kurulum: SSE Gerçek Zamanlı Log Akışı ----------
+
+func handleRepoInstallStream(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := safeRepoName(name); err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	dir := repoDir(name)
+	if _, err := os.Stat(dir); err != nil {
+		http.Error(w, "yerel klasör yok", 404)
+		return
+	}
+
+	stepID := r.URL.Query().Get("step")
+	if stepID == "" {
+		http.Error(w, "step parametresi gerekli", 400)
+		return
+	}
+
+	safeTag := "wyvdev-" + sanitizeDockerTag(name)
+	var toolName string
+	var args []string
+	switch stepID {
+	case "npm-install":
+		toolName, args = "npm", []string{"install"}
+	case "npm-build":
+		toolName, args = "npm", []string{"run", "build"}
+	case "pip-install":
+		toolName, args = "pip", []string{"install", "-r", "requirements.txt"}
+	case "pip-install-pyproject":
+		toolName, args = "pip", []string{"install", "-e", "."}
+	case "pip-repair":
+		toolName, args = "python", []string{"-m", "pip", "install", "--upgrade", "--force-reinstall", "-r", "requirements.txt"}
+	case "cargo-build":
+		toolName, args = "cargo", []string{"build", "--release"}
+	case "go-build":
+		toolName, args = "go", []string{"build", "./..."}
+	case "docker-build":
+		toolName, args = "docker", []string{"build", "-t", safeTag, "."}
+	case "compose-up":
+		toolName, args = "docker", []string{"compose", "up", "-d"}
+	case "copy-env":
+		// Special: just copy .env.example to .env
+		src := filepath.Join(dir, ".env.example")
+		dst := filepath.Join(dir, ".env")
+		data, err := os.ReadFile(src)
+		if err != nil {
+			http.Error(w, ".env.example bulunamadı", 404)
+			return
+		}
+		_ = os.WriteFile(dst, data, 0644)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		fmt.Fprintf(w, "data: .env.example → .env kopyalandı ✅\n\n")
+		fmt.Fprintf(w, "event: done\ndata: ok\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		return
+	default:
+		http.Error(w, "bilinmeyen adım: "+stepID, 400)
+		return
+	}
+
+	if !commandExistsInEnv(toolName, getEnhancedEnv()) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		fmt.Fprintf(w, "data: ❌ '%s' bulunamadı. Sistem & Teşhis sayfasından kurabilirsiniz.\n\n", toolName)
+		fmt.Fprintf(w, "event: error\ndata: missing-tool:%s\n\n", toolName)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, canFlush := w.(http.Flusher)
+	ctx := r.Context()
+
+	sendEvent := func(line string) {
+		line = strings.ReplaceAll(line, "\r", "")
+		if line == "" {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", line)
+		if canFlush {
+			flusher.Flush()
+		}
+	}
+
+	sendEvent(fmt.Sprintf("▶ %s %s", toolName, strings.Join(args, " ")))
+	sendEvent("---")
+
+	cmd := enhancedCommand(ctx, toolName, args...)
+	cmd.Dir = dir
+
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+
+	if err := cmd.Start(); err != nil {
+		sendEvent("❌ Komut başlatılamadı: " + err.Error())
+		fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		if canFlush {
+			flusher.Flush()
+		}
+		return
+	}
+
+	// Stream stdout and stderr concurrently
+	done := make(chan struct{}, 2)
+	streamPipe := func(pipe io.Reader) {
+		buf := make([]byte, 1)
+		var line []byte
+		for {
+			n, err := pipe.Read(buf)
+			if n > 0 {
+				if buf[0] == '\n' {
+					sendEvent(string(line))
+					line = line[:0]
+				} else {
+					line = append(line, buf[0])
+				}
+			}
+			if err != nil {
+				if len(line) > 0 {
+					sendEvent(string(line))
+				}
+				break
+			}
+		}
+		done <- struct{}{}
+	}
+
+	go streamPipe(stdout)
+	go streamPipe(stderr)
+
+	<-done
+	<-done
+
+	err := cmd.Wait()
+	if err != nil {
+		if ctx.Err() != nil {
+			sendEvent("⛔ Kullanıcı tarafından durduruldu.")
+			fmt.Fprintf(w, "event: cancelled\ndata: cancelled\n\n")
+		} else {
+			sendEvent(fmt.Sprintf("❌ Hata: %v", err))
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+		}
+	} else {
+		repoStartErrorsMux.Lock()
+		delete(repoStartErrors, name)
+		repoStartErrorsMux.Unlock()
+		sendEvent("✅ Tamamlandı!")
+		fmt.Fprintf(w, "event: done\ndata: ok\n\n")
+	}
+	if canFlush {
+		flusher.Flush()
+	}
+}
+
+
 // ---------- real skill install (npx skills add ...) ----------
 
 // handleRepoEnableSkill copies a locally-cloned skill repo straight into every
@@ -4455,6 +4834,8 @@ func runServer() {
 	mux.HandleFunc("POST /api/skills/sync-all", handleSkillsSyncAll)
 	mux.HandleFunc("POST /api/repos/{name}/start", handleRepoStart)
 	mux.HandleFunc("GET /api/repos/{name}/env-vars", handleRepoEnvVars)
+	mux.HandleFunc("GET /api/repos/{name}/analyze", handleRepoAnalyze)
+	mux.HandleFunc("GET /api/repos/{name}/install/stream", handleRepoInstallStream)
 	mux.HandleFunc("GET /api/repos/scan", handleReposScan)
 	mux.HandleFunc("POST /api/repos/check-all", handleCheckAllRepos)
 	mux.HandleFunc("GET /api/activity", handleActivity)
