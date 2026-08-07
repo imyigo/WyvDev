@@ -1041,12 +1041,36 @@ function renderAimAnalysis(a) {
     document.getElementById('aim-port').textContent = `:${a.portSuggestion}`;
   }
 
+  // Strategy mode banner
+  const strategyTitles = {
+    'compose':    { icon: '🐳', label: 'Docker Compose ile Çalıştır', cls: 'bg-blue-900/30 border-blue-500/30 text-blue-300' },
+    'docker':     { icon: '🐳', label: 'Docker ile Çalıştır',         cls: 'bg-blue-900/30 border-blue-500/30 text-blue-300' },
+    'local':      { icon: '⚡', label: 'Yerel Motor ile Çalıştır',     cls: 'bg-indigo-900/20 border-indigo-500/20 text-indigo-300' },
+    'skill-only': { icon: '📄', label: 'Skill — IDE\'ye Ekle',         cls: 'bg-emerald-900/20 border-emerald-500/20 text-emerald-300' },
+    'mcp-stdio':  { icon: '🔌', label: 'MCP Stdio Sunucusu',           cls: 'bg-cyan-900/20 border-cyan-500/20 text-cyan-300' },
+    'library':    { icon: '📦', label: 'Salt Okunur Kütüphane',        cls: 'bg-gray-800/40 border-gray-600/20 text-gray-400' },
+  };
+  const stBanner = document.getElementById('aim-strategy-banner');
+  const stInfo = strategyTitles[a.runStrategy || ''];
+  if (stBanner) {
+    if (stInfo) {
+      stBanner.className = `mb-3 px-3 py-2 rounded-lg border text-xs font-semibold flex items-center gap-2 ${stInfo.cls}`;
+      stBanner.innerHTML = `<span>${stInfo.icon}</span><span>${stInfo.label}</span>`;
+      stBanner.classList.remove('hidden');
+    } else {
+      stBanner.classList.add('hidden');
+    }
+  }
+
   // Extras
   const extras = document.getElementById('aim-extras');
   const extraItems = [];
   if (a.hasDockerfile) extraItems.push(`<div class="text-[10px] text-blue-400 flex items-center gap-1">🐳 Dockerfile mevcut</div>`);
   if (a.hasCompose)    extraItems.push(`<div class="text-[10px] text-blue-400 flex items-center gap-1">🐳 Compose mevcut</div>`);
   if (a.hasMakefile)   extraItems.push(`<div class="text-[10px] text-gray-400 flex items-center gap-1">⚙️ Makefile mevcut</div>`);
+  if (a.portSuggestion > 0 && (a.runStrategy === 'docker' || a.runStrategy === 'compose')) {
+    extraItems.push(`<div class="text-[10px] text-cyan-400 flex items-center gap-1">🔌 Port: ${a.portSuggestion}</div>`);
+  }
 
   // Skill status — shown directly in the modal
   if (a.hasSkill) {
@@ -2813,10 +2837,19 @@ function renderLibraryScan() {
   // into one row.
   function entryCapabilities(entry) {
     const caps = [];
+    const strategy = entry.runStrategy || '';
+    // MCP always gets the mcp cap
     if (entry.looksLikeMcp) caps.push('mcp');
+    // Skill cap
     if (entry.hasSkill) caps.push('skill');
-    if (entry.runMode) caps.push('service');
-    if (!caps.length) caps.push(entry.hasPackageJson || (entry.runtimes || []).length ? 'library' : 'other');
+    // Service cap — only if the strategy says it's runnable
+    if (strategy === 'compose' || strategy === 'docker' || strategy === 'local') {
+      caps.push('service');
+    }
+    // Fallback
+    if (!caps.length) {
+      caps.push(strategy === 'library' || strategy === 'skill-only' ? 'library' : 'other');
+    }
     return caps;
   }
 
@@ -2828,8 +2861,9 @@ function renderLibraryScan() {
   }
 
   function statusBadge(entry) {
+    const strategy = entry.runStrategy || entry.runMode || '';
     if (entry.isRunning) {
-      const portTxt = entry.runningPort ? `Port: ${entry.runningPort}` : 'Aktif';
+      const portTxt = entry.runningPort ? `Port: ${entry.runningPort}` : (entry.port ? `Port: ${entry.port}` : 'Aktif');
       return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">🟢 Çalışıyor (${portTxt})</span>`;
     }
     if (entry.hasStartError) {
@@ -2839,10 +2873,16 @@ function renderLibraryScan() {
       return `<button onclick="goToSystemDiagnostics('${entry.missingTool}')" title="Sistem & Teşhis sayfasına git" class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 cursor-pointer hover:bg-amber-500/25">⚠️ ${escapeHtml(entry.missingTool)} kurulu değil</button>`;
     }
     if (entry.isInstalled) {
-      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">✓ Hazır</span>`;
+      // For docker mode, show image built; for compose show 'Hazır'
+      const label = (strategy === 'docker') ? '✓ Image Hazır' : (strategy === 'compose' ? '✓ Compose Hazır' : '✓ Hazır');
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">${label}</span>`;
     }
-    if (entry.runMode) {
-      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">⚠️ Kurulum Gerekli</span>`;
+    // strategy-aware install-needed badge — skip for library/skill-only
+    if (strategy && strategy !== 'library' && strategy !== 'skill-only' && strategy !== '') {
+      const label = (strategy === 'docker') ? '🐳 Build Gerekli'
+        : (strategy === 'compose') ? '🐳 Compose Çalıştır'
+        : '⚠️ Kurulum Gerekli';
+      return `<span class="text-[10px] font-semibold px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">${label}</span>`;
     }
     return '';
   }
@@ -2859,13 +2899,14 @@ function renderLibraryScan() {
     if (entry.missingTool) {
       return `<button onclick="goToSystemDiagnostics('${entry.missingTool}')" title="Sistem & Teşhis sayfasından kurun" class="${cls} bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white"><i data-lucide="download" class="w-3.5 h-3.5"></i> ${escapeHtml(entry.missingTool)} Kurulu Değil</button>`;
     }
+    const isDockerStrategy = entry.runStrategy === 'docker' || entry.runStrategy === 'compose';
     if (entry.isInstalled) {
       return `<button onclick="startRepoProject('${entry.name}', this)" title="Çalıştır: ${escapeHtml(entry.startCommand || '')}" class="${cls} bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white"><i data-lucide="play" class="w-3.5 h-3.5 fill-current"></i> Başlat</button>`;
     }
-    if (entry.runMode === 'docker') {
-      return `<button onclick="showAdvancedInstallModal('${entry.name}')" class="${cls} bg-gradient-to-r from-blue-700 to-cyan-700 hover:from-blue-600 hover:to-cyan-600 text-white"><i data-lucide="package-2" class="w-3.5 h-3.5"></i> Kurulum Merkezi</button>`;
+    if (isDockerStrategy) {
+      return `<button onclick="showAdvancedInstallModal('${entry.name}')" class="${cls} bg-gradient-to-r from-blue-700 to-cyan-700 hover:from-blue-600 hover:to-cyan-600 text-white"><i data-lucide="package-2" class="w-3.5 h-3.5"></i> 🐳 Docker Kur</button>`;
     }
-    if (entry.runMode === 'local') {
+    if (entry.runStrategy === 'local' || entry.runMode === 'local') {
       return `<button onclick="showAdvancedInstallModal('${entry.name}')" class="${cls} bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white"><i data-lucide="package-2" class="w-3.5 h-3.5"></i> Kurulum Merkezi</button>`;
     }
     return '';

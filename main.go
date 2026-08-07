@@ -255,7 +255,9 @@ type ScanEntry struct {
 	RunningPid     int      `json:"runningPid,omitempty"`
 	RepoType       string   `json:"repoType"`
 	RepoTypeLabel  string   `json:"repoTypeLabel"`
-	RunMode        string   `json:"runMode,omitempty"`      // "local" or "docker"
+	RunMode        string   `json:"runMode,omitempty"`        // "local" or "docker" (legacy compat)
+	RunStrategy    string   `json:"runStrategy,omitempty"`    // "compose"|"docker"|"local"|"mcp-stdio"|"skill-only"|"library"
+	Port           int      `json:"port,omitempty"`           // guessed service port
 	MissingTool    string   `json:"missingTool,omitempty"`
 	LocalCommand   string   `json:"localCommand,omitempty"`
 	LocalArgs      []string `json:"localArgs,omitempty"`
@@ -2520,6 +2522,402 @@ func handleRepoRun(w http.ResponseWriter, r *http.Request) {
 
 // ---------- Gelişmiş Kurulum: Bağımlılık Analizi ----------
 
+// ── RunStrategy Engine ──────────────────────────────────────────────────────
+// determineRunStrategy inspects a repo directory and returns the single
+// strategy that governs which install steps to show and how to run the project.
+// Priority order (first match wins):
+//  1. docker-compose.*   → compose
+//  2. Dockerfile          → docker   (local tool steps are SKIPPED)
+//  3. go.mod              → local-go
+//  4. Cargo.toml          → local-rust
+//  5. package.json        → local-node (pm auto-detected)
+//  6. requirements.txt / pyproject.toml → local-python
+//  7. pom.xml             → local-maven
+//  8. build.gradle*       → local-gradle
+//  9. composer.json       → local-composer
+// 10. Gemfile             → local-ruby
+// 11. SKILL.md found      → skill-only
+// 12. looksLikeMcp flags  → mcp-stdio
+// 13. fallback            → library
+type RunStrategy struct {
+	Mode          string        // see constants above
+	InstallSteps  []InstallStep // steps relevant to this mode only
+	RunCommand    string        // start command (e.g. "npm run dev", "go run .", "docker run ...")
+	PackageManager string       // "npm"|"pnpm"|"yarn"|"bun" for node repos
+	Port          int           // guessed port (0 = unknown)
+	HasDockerfile bool
+	HasCompose    bool
+	HasMakefile   bool
+	Runtimes      []string      // all detected runtimes (for UI badges)
+	EnvMissing    []string      // env vars that need values
+}
+
+// guessPortFromDir reads .env, Dockerfile EXPOSE, and package.json scripts
+// to find the most likely port this service will listen on.
+func guessPortFromDir(dir string) int {
+	// 1. .env / .env.example — PORT= or SERVER_PORT=
+	for _, envFile := range []string{".env", ".env.example"} {
+		if data, err := os.ReadFile(filepath.Join(dir, envFile)); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "#") {
+					continue
+				}
+				for _, key := range []string{"PORT", "SERVER_PORT", "APP_PORT", "HTTP_PORT"} {
+					if strings.HasPrefix(line, key+"=") {
+						val := strings.TrimPrefix(line, key+"=")
+						val = strings.TrimSpace(strings.Split(val, "#")[0])
+						if p, e := strconv.Atoi(val); e == nil && p > 0 {
+							return p
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+	// 2. Dockerfile — EXPOSE line
+	if data, err := os.ReadFile(filepath.Join(dir, "Dockerfile")); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(strings.ToUpper(line), "EXPOSE ") {
+				portStr := strings.Fields(line)[1]
+				portStr = strings.Split(portStr, "/")[0] // strip /tcp etc.
+				if p, e := strconv.Atoi(portStr); e == nil && p > 0 {
+					return p
+				}
+			}
+		}
+	}
+	// 3. package.json scripts.start / scripts.dev — look for common port numbers
+	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		var pkg map[string]interface{}
+		if json.Unmarshal(data, &pkg) == nil {
+			if scripts, ok := pkg["scripts"].(map[string]interface{}); ok {
+				for _, key := range []string{"start", "dev", "serve"} {
+					if s, ok := scripts[key].(string); ok {
+						for _, common := range []string{"3000", "3001", "4000", "5000", "8000", "8080", "8888", "9000"} {
+							if strings.Contains(s, common) {
+								if p, e := strconv.Atoi(common); e == nil {
+									return p
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// determineRunStrategy analyzes a repo directory and returns the unified
+// RunStrategy that governs install steps, run commands, and UI display.
+func determineRunStrategy(name, dir string) RunStrategy {
+	s := RunStrategy{}
+	runtimeSet := map[string]bool{}
+
+	hasFile := func(name string) bool {
+		_, err := os.Stat(filepath.Join(dir, name))
+		return err == nil
+	}
+
+	// ── 1. Docker Compose (highest priority) ─────────────────────────────────
+	for _, cf := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"} {
+		if hasFile(cf) {
+			s.HasCompose = true
+			break
+		}
+	}
+
+	// ── 2. Dockerfile ────────────────────────────────────────────────────────
+	s.HasDockerfile = hasFile("Dockerfile")
+
+	// ── Detect ALL runtimes for badge display ────────────────────────────────
+	if s.HasDockerfile || s.HasCompose {
+		runtimeSet["docker"] = true
+	}
+	if hasFile("package.json") {
+		runtimeSet["node"] = true
+	}
+	if hasFile("requirements.txt") || hasFile("pyproject.toml") {
+		runtimeSet["python"] = true
+	}
+	if hasFile("Cargo.toml") {
+		runtimeSet["rust"] = true
+	}
+	if hasFile("go.mod") {
+		runtimeSet["go"] = true
+	}
+	if hasFile("composer.json") {
+		runtimeSet["composer"] = true
+	}
+	if hasFile("Gemfile") {
+		runtimeSet["gem"] = true
+	}
+	if hasFile("pom.xml") {
+		runtimeSet["maven"] = true
+	}
+	if hasFile("build.gradle") || hasFile("build.gradle.kts") {
+		runtimeSet["gradle"] = true
+	}
+	for rt := range runtimeSet {
+		s.Runtimes = append(s.Runtimes, rt)
+	}
+	s.HasMakefile = hasFile("Makefile")
+	s.Port = guessPortFromDir(dir)
+
+	// ── ENV check ─────────────────────────────────────────────────────────────
+	envExample := filepath.Join(dir, ".env.example")
+	envLocal := filepath.Join(dir, ".env")
+	if data, err := os.ReadFile(envExample); err == nil {
+		if _, err2 := os.Stat(envLocal); err2 != nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "#") {
+					continue
+				}
+				parts := strings.SplitN(line, "=", 2)
+				key := strings.TrimSpace(parts[0])
+				val := ""
+				if len(parts) > 1 {
+					val = strings.TrimSpace(parts[1])
+				}
+				if val == "" && key != "" {
+					s.EnvMissing = append(s.EnvMissing, key)
+				}
+			}
+		}
+	}
+
+	// ── STRATEGY DECISION (Docker-first) ──────────────────────────────────────
+
+	// Case 1: Docker Compose
+	if s.HasCompose {
+		s.Mode = "compose"
+		s.RunCommand = "docker compose up -d"
+		composeStep := InstallStep{ID: "compose-up", Label: "docker compose up -d", Cmd: "docker compose up -d", Required: true}
+		if len(s.EnvMissing) > 0 {
+			s.InstallSteps = append(s.InstallSteps, InstallStep{ID: "copy-env", Label: "cp .env.example .env", Cmd: "cp .env.example .env", Required: false})
+		}
+		s.InstallSteps = append(s.InstallSteps, composeStep)
+		return s
+	}
+
+	// Case 2: Dockerfile only (no compose)
+	if s.HasDockerfile {
+		s.Mode = "docker"
+		safeTag := "wyvdev-" + sanitizeDockerTag(name)
+		var runCmd string
+		if s.Port > 0 {
+			runCmd = fmt.Sprintf("docker run --rm -d -p %d:%d %s", s.Port, s.Port, safeTag)
+		} else {
+			runCmd = fmt.Sprintf("docker run --rm -d %s", safeTag)
+		}
+		s.RunCommand = runCmd
+		if len(s.EnvMissing) > 0 {
+			s.InstallSteps = append(s.InstallSteps, InstallStep{ID: "copy-env", Label: "cp .env.example .env", Cmd: "cp .env.example .env", Required: false})
+		}
+		s.InstallSteps = append(s.InstallSteps,
+			InstallStep{ID: "docker-build", Label: "docker build", Cmd: fmt.Sprintf("docker build -t %s .", safeTag), Required: true},
+			InstallStep{ID: "docker-run", Label: "docker run", Cmd: runCmd, Required: false},
+		)
+		return s
+	}
+
+	// Case 3: Go
+	if hasFile("go.mod") {
+		s.Mode = "local"
+		// Only add go-build if the binary doesn't exist yet
+		// Heuristic: any executable in dir root or a /bin subdir
+		binaryExists := false
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if fi, err := e.Info(); err == nil {
+				if fi.Mode()&0111 != 0 && !strings.HasSuffix(e.Name(), ".go") {
+					binaryExists = true
+					break
+				}
+			}
+		}
+		// Also check dist/ or bin/ subfolders
+		if !binaryExists {
+			for _, sub := range []string{"dist", "bin"} {
+				subEntries, _ := os.ReadDir(filepath.Join(dir, sub))
+				for _, e := range subEntries {
+					if !e.IsDir() {
+						binaryExists = true
+						break
+					}
+				}
+				if binaryExists {
+					break
+				}
+			}
+		}
+		goStep := InstallStep{ID: "go-build", Label: "go build ./...", Cmd: "go build ./...", Required: true}
+		if binaryExists {
+			goStep.Status = "done"
+		}
+		s.InstallSteps = append(s.InstallSteps, goStep)
+		s.RunCommand = "go run ."
+		return s
+	}
+
+	// Case 4: Rust
+	if hasFile("Cargo.toml") {
+		s.Mode = "local"
+		cStep := InstallStep{ID: "cargo-build", Label: "cargo build --release", Cmd: "cargo build --release", Required: true}
+		if _, err := os.Stat(filepath.Join(dir, "target", "release")); err == nil {
+			cStep.Status = "done"
+		}
+		s.InstallSteps = append(s.InstallSteps, cStep)
+		s.RunCommand = "cargo run"
+		return s
+	}
+
+	// Case 5: Node.js
+	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		s.Mode = "local"
+		pm := detectNodePackageManager(dir, data)
+		s.PackageManager = pm
+
+		var pkg map[string]interface{}
+		_ = json.Unmarshal(data, &pkg)
+
+		// Install step — only required if node_modules missing
+		var installCmd string
+		switch pm {
+		case "pnpm":
+			installCmd = "pnpm install --no-frozen-lockfile"
+		case "yarn":
+			installCmd = "yarn install --frozen-lockfile=false"
+		case "bun":
+			installCmd = "bun install"
+		default:
+			installCmd = "npm install"
+		}
+		installStep := InstallStep{ID: pm + "-install", Label: pm + " install", Cmd: installCmd, Required: true}
+		if _, err2 := os.Stat(filepath.Join(dir, "node_modules")); err2 == nil {
+			installStep.Status = "done"
+		}
+		s.InstallSteps = append(s.InstallSteps, installStep)
+
+		// Build step — optional
+		if scripts, ok := pkg["scripts"].(map[string]interface{}); ok {
+			if _, hasBuild := scripts["build"]; hasBuild {
+				s.InstallSteps = append(s.InstallSteps, InstallStep{ID: pm + "-build", Label: pm + " run build", Cmd: pm + " run build", Required: false})
+			}
+		}
+
+		// Infer start command from scripts
+		if scripts, ok := pkg["scripts"].(map[string]interface{}); ok {
+			for _, key := range []string{"dev", "start", "serve"} {
+				if _, ok2 := scripts[key]; ok2 {
+					s.RunCommand = pm + " run " + key
+					break
+				}
+			}
+		}
+		if s.RunCommand == "" {
+			s.RunCommand = pm + " start"
+		}
+		if len(s.EnvMissing) > 0 {
+			s.InstallSteps = append(s.InstallSteps, InstallStep{ID: "copy-env", Label: "cp .env.example .env", Cmd: "cp .env.example .env", Required: false})
+		}
+		return s
+	}
+
+	// Case 6: Python
+	if hasFile("requirements.txt") {
+		s.Mode = "local"
+		pipStep := InstallStep{ID: "pip-install", Label: "pip install -r requirements.txt", Cmd: "pip install -r requirements.txt", Required: true}
+		if _, e1 := os.Stat(filepath.Join(dir, "venv")); e1 == nil {
+			pipStep.Status = "done"
+		} else if _, e2 := os.Stat(filepath.Join(dir, ".venv")); e2 == nil {
+			pipStep.Status = "done"
+		}
+		s.InstallSteps = append(s.InstallSteps, pipStep)
+		s.RunCommand = "python main.py"
+		return s
+	}
+	if hasFile("pyproject.toml") {
+		s.Mode = "local"
+		s.InstallSteps = append(s.InstallSteps, InstallStep{ID: "pip-install-pyproject", Label: "pip install -e .", Cmd: "pip install -e .", Required: true})
+		s.RunCommand = "python -m app"
+		return s
+	}
+
+	// Case 7: Maven
+	if hasFile("pom.xml") {
+		s.Mode = "local"
+		mvnStep := InstallStep{ID: "mvn-install", Label: "mvn install -DskipTests", Cmd: "mvn install -DskipTests", Required: true}
+		if _, err := os.Stat(filepath.Join(dir, "target")); err == nil {
+			mvnStep.Status = "done"
+		}
+		s.InstallSteps = append(s.InstallSteps, mvnStep)
+		s.RunCommand = "java -jar target/*.jar"
+		return s
+	}
+
+	// Case 8: Gradle
+	for _, gf := range []string{"build.gradle", "build.gradle.kts"} {
+		if hasFile(gf) {
+			s.Mode = "local"
+			gStep := InstallStep{ID: "gradle-build", Label: "gradle build", Cmd: "gradle build", Required: true}
+			if _, err := os.Stat(filepath.Join(dir, "build")); err == nil {
+				gStep.Status = "done"
+			}
+			s.InstallSteps = append(s.InstallSteps, gStep)
+			s.RunCommand = "java -jar build/libs/*.jar"
+			return s
+		}
+	}
+
+	// Case 9: PHP Composer
+	if hasFile("composer.json") {
+		s.Mode = "local"
+		cmpStep := InstallStep{ID: "composer-install", Label: "composer install", Cmd: "composer install --no-interaction", Required: true}
+		if _, err := os.Stat(filepath.Join(dir, "vendor")); err == nil {
+			cmpStep.Status = "done"
+		}
+		s.InstallSteps = append(s.InstallSteps, cmpStep)
+		s.RunCommand = "php artisan serve"
+		return s
+	}
+
+	// Case 10: Ruby
+	if hasFile("Gemfile") {
+		s.Mode = "local"
+		gemStep := InstallStep{ID: "bundle-install", Label: "bundle install", Cmd: "bundle install", Required: true}
+		if _, err := os.Stat(filepath.Join(dir, "Gemfile.lock")); err == nil {
+			gemStep.Status = "done"
+		}
+		s.InstallSteps = append(s.InstallSteps, gemStep)
+		s.RunCommand = "bundle exec ruby app.rb"
+		return s
+	}
+
+	// Case 11: Skill-only (no runtime, only SKILL.md)
+	if findSkillMd(dir) != "" {
+		s.Mode = "skill-only"
+		return s
+	}
+
+	// Case 12: Looks like MCP (has stdio entrypoint markers)
+	if hasFile("mcp.json") || hasFile("mcp_server.py") || hasFile("server.py") {
+		s.Mode = "mcp-stdio"
+		return s
+	}
+
+	// Case 13: Library / bare repo — no runnable config found
+	s.Mode = "library"
+	return s
+}
+
 type InstallStep struct {
 	ID       string `json:"id"`
 	Label    string `json:"label"`
@@ -2592,292 +2990,74 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 	}
 	dir := repoDir(name)
 	if _, err := os.Stat(dir); err != nil {
-		writeErr(w, 404, "yerel klasör yok")
+		writeErr(w, 404, "yerel klasu00f6r yok")
 		return
 	}
 
-	result := AnalyzeResult{Name: name}
-	runtimeSet := map[string]bool{}
-	steps := []InstallStep{}
+	strat := determineRunStrategy(name, dir)
 
-	// --- Node.js ---
-	pkgJson := filepath.Join(dir, "package.json")
-	if data, err := os.ReadFile(pkgJson); err == nil {
-		runtimeSet["node"] = true
+	result := AnalyzeResult{
+		Name:           name,
+		Runtimes:       strat.Runtimes,
+		PackageManager: strat.PackageManager,
+		InstallSteps:   strat.InstallSteps,
+		EnvVarsNeeded:  strat.EnvMissing,
+		PortSuggestion: strat.Port,
+		HasDockerfile:  strat.HasDockerfile,
+		HasCompose:     strat.HasCompose,
+		HasMakefile:    strat.HasMakefile,
+	}
 
-		// Detect the correct package manager FIRST
-		pm := detectNodePackageManager(dir, data)
-		result.PackageManager = pm
-
-		var pkg map[string]interface{}
-		if json.Unmarshal(data, &pkg) == nil {
-			count := 0
-			if deps, ok := pkg["dependencies"].(map[string]interface{}); ok {
-				count += len(deps)
-			}
-			if dev, ok := pkg["devDependencies"].(map[string]interface{}); ok {
-				count += len(dev)
-			}
-			result.TotalDeps += count
-			result.DiskEstimateMB += count / 5
-		}
-		nmDir := filepath.Join(dir, "node_modules")
-		nmExists := false
-		if _, err := os.Stat(nmDir); err == nil {
-			nmExists = true
-			result.InstalledDeps += result.TotalDeps
-		} else {
-			result.MissingFiles = append(result.MissingFiles, "node_modules")
-		}
-
-		// Build install step — always listed so the user can re-run it
-		installStepID := pm + "-install"
-		installLabel := pm + " install"
-		// pnpm: use --no-frozen-lockfile so monorepos with workspace:* don't fail
-		var installCmd string
-		switch pm {
-		case "pnpm":
-			installCmd = "pnpm install --no-frozen-lockfile"
-		case "yarn":
-			installCmd = "yarn install --frozen-lockfile=false"
-		case "bun":
-			installCmd = "bun install"
-		default:
-			installCmd = "npm install"
-		}
-		installStep := InstallStep{ID: installStepID, Label: installLabel, Cmd: installCmd, Required: true}
-		if nmExists {
-			installStep.Status = "done" // already installed — show green in UI
-		}
-		steps = append(steps, installStep)
-
-		// Check for build scripts
-		var pkg2 map[string]interface{}
-		_ = json.Unmarshal(data, &pkg2)
-		if scripts, ok := pkg2["scripts"].(map[string]interface{}); ok {
-			if _, hasBuild := scripts["build"]; hasBuild {
-				buildStepID := pm + "-build"
-				steps = append(steps, InstallStep{ID: buildStepID, Label: pm + " run build", Cmd: pm + " run build", Required: false})
-			}
-			if start, ok := scripts["start"].(string); ok {
-				if strings.Contains(start, "3000") {
-					result.PortSuggestion = 3000
-				} else if strings.Contains(start, "8080") {
-					result.PortSuggestion = 8080
-				}
+	for _, step := range strat.InstallSteps {
+		if step.Required {
+			result.TotalDeps++
+			if step.Status == "done" {
+				result.InstalledDeps++
 			}
 		}
 	}
-
-	// --- Python ---
-	reqTxt := filepath.Join(dir, "requirements.txt")
-	pyproject := filepath.Join(dir, "pyproject.toml")
-	if _, err := os.Stat(reqTxt); err == nil {
-		runtimeSet["python"] = true
-		if data, err := os.ReadFile(reqTxt); err == nil {
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			count := 0
-			for _, l := range lines {
-				l = strings.TrimSpace(l)
-				if l != "" && !strings.HasPrefix(l, "#") {
-					count++
-				}
-			}
-			result.TotalDeps += count
-			result.DiskEstimateMB += count * 2
-		}
-		venvDir := filepath.Join(dir, "venv")
-		venvDir2 := filepath.Join(dir, ".venv")
-		if _, err1 := os.Stat(venvDir); err1 == nil {
-			result.InstalledDeps += result.TotalDeps
-		} else if _, err2 := os.Stat(venvDir2); err2 == nil {
-			result.InstalledDeps += result.TotalDeps
-		} else {
-			result.MissingFiles = append(result.MissingFiles, "venv/")
-			steps = append(steps, InstallStep{ID: "pip-install", Label: "pip install -r requirements.txt", Cmd: "pip install -r requirements.txt", Required: true})
-		}
-	} else if _, err := os.Stat(pyproject); err == nil {
-		runtimeSet["python"] = true
-		steps = append(steps, InstallStep{ID: "pip-install-pyproject", Label: "pip install -e .", Cmd: "pip install -e .", Required: true})
-	}
-
-	// --- Rust / Cargo ---
-	cargoToml := filepath.Join(dir, "Cargo.toml")
-	if _, err := os.Stat(cargoToml); err == nil {
-		runtimeSet["rust"] = true
-		targetDir := filepath.Join(dir, "target", "release")
-		if _, err := os.Stat(targetDir); err == nil {
-			result.InstalledDeps++
-		} else {
-			result.MissingFiles = append(result.MissingFiles, "target/")
-			steps = append(steps, InstallStep{ID: "cargo-build", Label: "cargo build --release", Cmd: "cargo build --release", Required: true})
-		}
-		result.DiskEstimateMB += 200
-	}
-
-	// --- Go ---
-	goMod := filepath.Join(dir, "go.mod")
-	if data, err := os.ReadFile(goMod); err == nil {
-		runtimeSet["go"] = true
-		lines := strings.Split(string(data), "\n")
-		for _, l := range lines {
-			if strings.HasPrefix(strings.TrimSpace(l), "require") {
-				result.TotalDeps++
-			}
-		}
-		steps = append(steps, InstallStep{ID: "go-build", Label: "go build ./...", Cmd: "go build ./...", Required: true})
-	}
-
-	// --- Docker ---
-	dockerfile := filepath.Join(dir, "Dockerfile")
-	composePaths := []string{
-		filepath.Join(dir, "docker-compose.yml"),
-		filepath.Join(dir, "docker-compose.yaml"),
-		filepath.Join(dir, "compose.yml"),
-	}
-	if _, err := os.Stat(dockerfile); err == nil {
-		runtimeSet["docker"] = true
-		result.HasDockerfile = true
-		steps = append(steps, InstallStep{ID: "docker-build", Label: "docker build", Cmd: "docker build -t " + name + " .", Required: true})
-		steps = append(steps, InstallStep{ID: "docker-run", Label: "docker run", Cmd: "docker run --rm -d " + name, Required: false})
-	}
-	for _, cp := range composePaths {
-		if _, err := os.Stat(cp); err == nil {
-			result.HasCompose = true
-			steps = append(steps, InstallStep{ID: "compose-up", Label: "docker compose up -d", Cmd: "docker compose up -d", Required: true})
-			break
-		}
-	}
-
-	// --- PHP Composer ---
-	composerJson := filepath.Join(dir, "composer.json")
-	if _, err := os.Stat(composerJson); err == nil {
-		runtimeSet["composer"] = true
-		vendorDir := filepath.Join(dir, "vendor")
-		if _, err := os.Stat(vendorDir); err != nil {
-			result.MissingFiles = append(result.MissingFiles, "vendor/")
-			steps = append(steps, InstallStep{ID: "composer-install", Label: "composer install", Cmd: "composer install --no-interaction", Required: true})
-		} else {
-			result.InstalledDeps++
-		}
-	}
-
-	// --- Ruby Gems ---
-	gemfile := filepath.Join(dir, "Gemfile")
-	if _, err := os.Stat(gemfile); err == nil {
-		runtimeSet["gem"] = true
-		gemLock := filepath.Join(dir, "Gemfile.lock")
-		bundleDir := filepath.Join(dir, ".bundle")
-		if _, err1 := os.Stat(gemLock); err1 != nil {
-			if _, err2 := os.Stat(bundleDir); err2 != nil {
-				result.MissingFiles = append(result.MissingFiles, ".bundle/")
-				steps = append(steps, InstallStep{ID: "bundle-install", Label: "bundle install", Cmd: "bundle install", Required: true})
-			}
-		} else {
-			result.InstalledDeps++
-		}
-	}
-
-	// --- Java Maven ---
-	pomXml := filepath.Join(dir, "pom.xml")
-	if _, err := os.Stat(pomXml); err == nil {
-		runtimeSet["maven"] = true
-		targetDir := filepath.Join(dir, "target")
-		if _, err := os.Stat(targetDir); err != nil {
-			result.MissingFiles = append(result.MissingFiles, "target/")
-			steps = append(steps, InstallStep{ID: "mvn-install", Label: "mvn install -DskipTests", Cmd: "mvn install -DskipTests", Required: true})
-		} else {
-			result.InstalledDeps++
-		}
-		result.DiskEstimateMB += 100
-	}
-
-	// --- Java Gradle ---
-	buildGradle := filepath.Join(dir, "build.gradle")
-	buildGradleKts := filepath.Join(dir, "build.gradle.kts")
-	if _, err1 := os.Stat(buildGradle); err1 == nil {
-		runtimeSet["gradle"] = true
-		buildDir := filepath.Join(dir, "build")
-		if _, err := os.Stat(buildDir); err != nil {
-			result.MissingFiles = append(result.MissingFiles, "build/")
-			steps = append(steps, InstallStep{ID: "gradle-build", Label: "gradle build", Cmd: "gradle build", Required: true})
-		} else {
-			result.InstalledDeps++
-		}
-	} else if _, err2 := os.Stat(buildGradleKts); err2 == nil {
-		runtimeSet["gradle"] = true
-		steps = append(steps, InstallStep{ID: "gradle-build", Label: "gradle build", Cmd: "gradle build", Required: true})
-	}
-
-	// --- Makefile ---
-	makefile := filepath.Join(dir, "Makefile")
-	if _, err := os.Stat(makefile); err == nil {
-		result.HasMakefile = true
-		// Check if Makefile has an 'install' target
-		if data, err := os.ReadFile(makefile); err == nil {
-			if strings.Contains(string(data), "\ninstall:") || strings.HasPrefix(string(data), "install:") {
-				steps = append(steps, InstallStep{ID: "make-install", Label: "make install", Cmd: "make install", Required: false})
-			}
-		}
-	}
-
-	// --- Shell Script (install.sh / setup.sh) — only if explicitly allowed ---
-	// Note: disabled by default in AutoInstallConfig.AllowShellScripts for security
-	for _, scriptName := range []string{"install.sh", "setup.sh", "bootstrap.sh"} {
-		scriptPath := filepath.Join(dir, scriptName)
-		if _, err := os.Stat(scriptPath); err == nil {
-			steps = append(steps, InstallStep{ID: "shell-" + strings.TrimSuffix(scriptName, ".sh"), Label: "bash " + scriptName, Cmd: "bash " + scriptName, Required: false})
-			break
-		}
-	}
-
-	// --- ENV variables ---
-	envExample := filepath.Join(dir, ".env.example")
-	envLocal := filepath.Join(dir, ".env")
-	if data, err := os.ReadFile(envExample); err == nil {
-		lines := strings.Split(string(data), "\n")
-		envMissing := []string{}
-		for _, l := range lines {
-			l = strings.TrimSpace(l)
-			if l == "" || strings.HasPrefix(l, "#") {
-				continue
-			}
-			parts := strings.SplitN(l, "=", 2)
-			key := strings.TrimSpace(parts[0])
-			val := ""
-			if len(parts) > 1 {
-				val = strings.TrimSpace(parts[1])
-			}
-			if val == "" && key != "" {
-				envMissing = append(envMissing, key)
-			}
-		}
-		if _, err := os.Stat(envLocal); err != nil {
-			result.EnvVarsNeeded = envMissing
-			if len(envMissing) > 0 {
-				steps = append(steps, InstallStep{ID: "copy-env", Label: "cp .env.example .env", Cmd: "cp .env.example .env", Required: false})
-			}
-		}
-	}
-
-	// Runtimes list
-	for rt := range runtimeSet {
-		result.Runtimes = append(result.Runtimes, rt)
-	}
-
-	// Install percentage
 	if result.TotalDeps > 0 {
 		result.InstallPercent = int(float64(result.InstalledDeps) / float64(result.TotalDeps) * 100)
-	} else if len(result.MissingFiles) == 0 && len(steps) == 0 {
+	} else {
 		result.InstallPercent = 100
 	}
 
-	// ── Skill status ──────────────────────────────────────────────
-	// 1. Does this repo contain a SKILL.md?
-	result.HasSkill = findSkillMd(dir) != ""
+	switch strat.Mode {
+	case "local":
+		if strat.PackageManager != "" {
+			result.DiskEstimateMB = result.TotalDeps * 2
+		} else if containsStr(strat.Runtimes, "rust") {
+			result.DiskEstimateMB = 200
+		} else if containsStr(strat.Runtimes, "maven") {
+			result.DiskEstimateMB = 100
+		}
+	case "docker", "compose":
+		result.DiskEstimateMB = 300
+	}
 
+	switch strat.Mode {
+	case "local":
+		if strat.PackageManager != "" {
+			if _, err := os.Stat(filepath.Join(dir, "node_modules")); err != nil {
+				result.MissingFiles = append(result.MissingFiles, "node_modules")
+			}
+		}
+		if containsStr(strat.Runtimes, "python") {
+			if _, e1 := os.Stat(filepath.Join(dir, "venv")); e1 != nil {
+				if _, e2 := os.Stat(filepath.Join(dir, ".venv")); e2 != nil {
+					result.MissingFiles = append(result.MissingFiles, "venv/")
+				}
+			}
+		}
+		if containsStr(strat.Runtimes, "rust") {
+			if _, err := os.Stat(filepath.Join(dir, "target", "release")); err != nil {
+				result.MissingFiles = append(result.MissingFiles, "target/")
+			}
+		}
+	}
+
+	result.HasSkill = findSkillMd(dir) != ""
 	if result.HasSkill {
-		// 2. Is it recorded in state.json RecommendedRepos?
 		if s, serr := loadState(); serr == nil {
 			for _, sk := range s.RecommendedRepos {
 				if sk.ID == name || sk.Name == name {
@@ -2886,8 +3066,6 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-
-		// 3. Is it physically installed in any IDE's skills directory?
 		skillFolders := findAllSkillFolders(dir)
 		skillNames := make(map[string]bool)
 		for _, sf := range skillFolders {
@@ -2905,14 +3083,21 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		// If it's installed in an IDE, also ensure state reflects that
 		if result.SkillInstalledInIde && !result.SkillEnabled {
 			result.SkillEnabled = true
 		}
 	}
 
-	result.InstallSteps = steps
 	writeJSON(w, 200, result)
+}
+
+func containsStr(slice []string, target string) bool {
+	for _, s := range slice {
+		if s == target {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- Gelişmiş Kurulum: SSE Gerçek Zamanlı Log Akışı ----------
@@ -3285,10 +3470,9 @@ func runAutoInstallForRepo(name string, cfg AutoInstallConfig) {
 
 	logActivity("auto-install-start", fmt.Sprintf("%s bağımlılık analizi başlıyor...", name))
 
-	// Build a temporary HTTP request to reuse handleRepoAnalyze logic inline
-	// We call the analyze logic directly by re-running the detection
-	analysis := analyzeRepoDir(name, dir)
-	if len(analysis.InstallSteps) == 0 {
+	// Use the unified RunStrategy engine (same source of truth as handleRepoAnalyze)
+	strat := determineRunStrategy(name, dir)
+	if len(strat.InstallSteps) == 0 {
 		logActivity("auto-install-skip", fmt.Sprintf("%s: kurulum adımı bulunamadı (zaten hazır?)", name))
 		return
 	}
@@ -3300,22 +3484,27 @@ func runAutoInstallForRepo(name string, cfg AutoInstallConfig) {
 	}
 
 	runtimeForStep := map[string]string{
+		// Node.js — any pm
 		"npm-install": "node", "npm-build": "node",
+		"pnpm-install": "node", "pnpm-build": "node",
+		"yarn-install": "node", "yarn-build": "node",
+		"bun-install": "node", "bun-build": "node",
+		// Other runtimes
 		"pip-install": "python", "pip-install-pyproject": "python", "pip-repair": "python",
 		"cargo-build": "rust",
-		"go-build": "go",
+		"go-build":    "go",
 		"docker-build": "docker", "docker-run": "docker", "compose-up": "docker",
 		"composer-install": "composer",
-		"bundle-install": "gem",
-		"mvn-install": "maven",
-		"gradle-build": "gradle",
-		"make-install": "make",
+		"bundle-install":   "gem",
+		"mvn-install":      "maven",
+		"gradle-build":     "gradle",
+		"make-install":     "make",
 		"shell-install": "shell", "shell-setup": "shell", "shell-bootstrap": "shell",
 		"copy-env": "all",
 	}
 
 	filteredSteps := []InstallStep{}
-	for _, step := range analysis.InstallSteps {
+	for _, step := range strat.InstallSteps {
 		rt := runtimeForStep[step.ID]
 		if rt == "" {
 			rt = "all"
@@ -3387,111 +3576,6 @@ func runAutoInstallForRepo(name string, cfg AutoInstallConfig) {
 	repoStartErrorsMux.Unlock()
 }
 
-// analyzeRepoDir re-runs the same detection logic from handleRepoAnalyze without HTTP.
-func analyzeRepoDir(name, dir string) AnalyzeResult {
-	result := AnalyzeResult{Name: name}
-	runtimeSet := map[string]bool{}
-	steps := []InstallStep{}
-
-	type detector struct {
-		file string
-		fn   func()
-	}
-
-	// Node.js
-	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
-		runtimeSet["node"] = true
-		var pkg map[string]interface{}
-		if json.Unmarshal(data, &pkg) == nil {
-			count := 0
-			if d, ok := pkg["dependencies"].(map[string]interface{}); ok { count += len(d) }
-			if d, ok := pkg["devDependencies"].(map[string]interface{}); ok { count += len(d) }
-			result.TotalDeps += count
-		}
-		if _, err := os.Stat(filepath.Join(dir, "node_modules")); err != nil {
-			steps = append(steps, InstallStep{ID: "npm-install", Label: "npm install", Cmd: "npm install", Required: true})
-		}
-	}
-	// Python
-	if _, err := os.Stat(filepath.Join(dir, "requirements.txt")); err == nil {
-		runtimeSet["python"] = true
-		if _, e1 := os.Stat(filepath.Join(dir, "venv")); e1 != nil {
-			if _, e2 := os.Stat(filepath.Join(dir, ".venv")); e2 != nil {
-				steps = append(steps, InstallStep{ID: "pip-install", Label: "pip install -r requirements.txt", Cmd: "pip install -r requirements.txt", Required: true})
-			}
-		}
-	} else if _, err := os.Stat(filepath.Join(dir, "pyproject.toml")); err == nil {
-		runtimeSet["python"] = true
-		steps = append(steps, InstallStep{ID: "pip-install-pyproject", Label: "pip install -e .", Cmd: "pip install -e .", Required: true})
-	}
-	// Rust
-	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
-		runtimeSet["rust"] = true
-		if _, err := os.Stat(filepath.Join(dir, "target", "release")); err != nil {
-			steps = append(steps, InstallStep{ID: "cargo-build", Label: "cargo build --release", Cmd: "cargo build --release", Required: true})
-		}
-	}
-	// Go
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-		runtimeSet["go"] = true
-		steps = append(steps, InstallStep{ID: "go-build", Label: "go build ./...", Cmd: "go build ./...", Required: true})
-	}
-	// Docker
-	if _, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil {
-		runtimeSet["docker"] = true
-		steps = append(steps, InstallStep{ID: "docker-build", Label: "docker build", Cmd: "docker build -t " + name + " .", Required: true})
-	}
-	for _, cp := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml"} {
-		if _, err := os.Stat(filepath.Join(dir, cp)); err == nil {
-			steps = append(steps, InstallStep{ID: "compose-up", Label: "docker compose up -d", Cmd: "docker compose up -d", Required: true})
-			break
-		}
-	}
-	// PHP Composer
-	if _, err := os.Stat(filepath.Join(dir, "composer.json")); err == nil {
-		runtimeSet["composer"] = true
-		if _, err := os.Stat(filepath.Join(dir, "vendor")); err != nil {
-			steps = append(steps, InstallStep{ID: "composer-install", Label: "composer install", Cmd: "composer install --no-interaction", Required: true})
-		}
-	}
-	// Ruby
-	if _, err := os.Stat(filepath.Join(dir, "Gemfile")); err == nil {
-		runtimeSet["gem"] = true
-		if _, err := os.Stat(filepath.Join(dir, "Gemfile.lock")); err != nil {
-			steps = append(steps, InstallStep{ID: "bundle-install", Label: "bundle install", Cmd: "bundle install", Required: true})
-		}
-	}
-	// Maven
-	if _, err := os.Stat(filepath.Join(dir, "pom.xml")); err == nil {
-		runtimeSet["maven"] = true
-		if _, err := os.Stat(filepath.Join(dir, "target")); err != nil {
-			steps = append(steps, InstallStep{ID: "mvn-install", Label: "mvn install -DskipTests", Cmd: "mvn install -DskipTests", Required: true})
-		}
-	}
-	// Gradle
-	for _, gf := range []string{"build.gradle", "build.gradle.kts"} {
-		if _, err := os.Stat(filepath.Join(dir, gf)); err == nil {
-			runtimeSet["gradle"] = true
-			if _, err := os.Stat(filepath.Join(dir, "build")); err != nil {
-				steps = append(steps, InstallStep{ID: "gradle-build", Label: "gradle build", Cmd: "gradle build", Required: true})
-			}
-			break
-		}
-	}
-	// Shell scripts
-	for _, sf := range []string{"install.sh", "setup.sh", "bootstrap.sh"} {
-		if _, err := os.Stat(filepath.Join(dir, sf)); err == nil {
-			steps = append(steps, InstallStep{ID: "shell-" + strings.TrimSuffix(sf, ".sh"), Label: "bash " + sf, Cmd: "bash " + sf, Required: false})
-			break
-		}
-	}
-
-	for rt := range runtimeSet {
-		result.Runtimes = append(result.Runtimes, rt)
-	}
-	result.InstallSteps = steps
-	return result
-}
 
 // runInstallStepBlocking runs a single install step and waits for completion.
 func runInstallStepBlocking(ctx context.Context, repoName, dir, stepID string) error {
@@ -4110,18 +4194,53 @@ func scanRepoFolder(name string) ScanEntry {
 
 	entry.Repo = gitRemoteRepo(dir)
 
-	// Installation detection (node_modules, .venv, venv, target)
-	if _, err := os.Stat(filepath.Join(dir, "node_modules")); err == nil {
-		entry.IsInstalled = true
+	// Installation detection — strategy-aware
+	// Docker-first: if this is a Docker/Compose project, node_modules/venv
+	// are irrelevant — the container installs them internally.
+	hasDockerfile := false
+	hasCompose := false
+	for _, cf := range []string{"Dockerfile", "dockerfile"} {
+		if _, err := os.Stat(filepath.Join(dir, cf)); err == nil {
+			hasDockerfile = true
+			break
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".venv")); err == nil {
-		entry.IsInstalled = true
+	for _, cf := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"} {
+		if _, err := os.Stat(filepath.Join(dir, cf)); err == nil {
+			hasCompose = true
+			break
+		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "venv")); err == nil {
-		entry.IsInstalled = true
-	}
-	if _, err := os.Stat(filepath.Join(dir, "target")); err == nil {
-		entry.IsInstalled = true
+
+	if hasCompose || hasDockerfile {
+		// Docker projects: IsInstalled = true only if the Docker image already built.
+		// Lightweight check: docker image ls <tag> --quiet (skip if docker not available)
+		if commandExistsInEnv("docker", getEnhancedEnv()) {
+			safeTag := "wyvdev-" + sanitizeDockerTag(name)
+			ctx5, cancel5 := context.WithTimeout(context.Background(), 3*time.Second)
+			out, err5 := exec.CommandContext(ctx5, "docker", "image", "ls", safeTag, "--quiet").Output()
+			cancel5()
+			if err5 == nil && len(strings.TrimSpace(string(out))) > 0 {
+				entry.IsInstalled = true
+			}
+		}
+	} else {
+		// Local runtime: check for install artifacts
+		if _, err := os.Stat(filepath.Join(dir, "node_modules")); err == nil {
+			entry.IsInstalled = true
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".venv")); err == nil {
+			entry.IsInstalled = true
+		}
+		if _, err := os.Stat(filepath.Join(dir, "venv")); err == nil {
+			entry.IsInstalled = true
+		}
+		if _, err := os.Stat(filepath.Join(dir, "target")); err == nil {
+			entry.IsInstalled = true
+		}
+		if _, err := os.Stat(filepath.Join(dir, "vendor")); err == nil {
+			entry.IsInstalled = true
+		}
 	}
 
 	// Start command detection
@@ -4372,6 +4491,12 @@ func scanRepoFolder(name string) ScanEntry {
 		entry.LocalCommand = ""
 		entry.LocalArgs = nil
 	}
+
+	// Populate RunStrategy + Port from the unified engine
+	// (fast: determineRunStrategy only does os.Stat calls, no exec)
+	strat := determineRunStrategy(name, dir)
+	entry.RunStrategy = strat.Mode
+	entry.Port = strat.Port
 
 	return entry
 }
