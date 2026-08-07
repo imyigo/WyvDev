@@ -2667,6 +2667,9 @@ async function installSystemTool(id, btnEl) {
   }
 }
 
+// Tracks which tool IDs are currently missing (set by loadSystemHealth)
+let _missingSystemTools = [];
+
 async function loadSystemHealth(btnEl) {
   const container = document.getElementById('system-health-grid');
   const summaryBadge = document.getElementById('runtime-summary-badge');
@@ -2695,12 +2698,28 @@ async function loadSystemHealth(btnEl) {
     }
 
     const runtimes = data.runtimes || [];
+    _missingSystemTools = runtimes.filter(rt => !rt.installed).map(rt => rt.id);
+
+    // Show / hide bulk install bar
+    const bulkBar = document.getElementById('bulk-install-bar');
+    const bulkBtn = document.getElementById('bulk-install-btn');
+    const bulkLabel = document.getElementById('bulk-install-btn-label');
+    if (bulkBar) {
+      if (_missingSystemTools.length > 0) {
+        bulkBar.classList.remove('hidden');
+        if (bulkLabel) bulkLabel.textContent = `⚡ ${_missingSystemTools.length} Eksik Aracı Kur`;
+        if (bulkBtn) bulkBtn.classList.add('animate-pulse');
+      } else {
+        bulkBar.classList.add('hidden');
+      }
+    }
+
     container.innerHTML = runtimes.map(rt => `
-      <div class="p-3.5 rounded-xl bg-gray-950/60 border ${rt.installed ? 'border-gray-800 hover:border-emerald-500/40' : 'border-amber-500/30 bg-amber-950/10'} space-y-2 flex flex-col justify-between">
+      <div class="p-3.5 rounded-xl bg-gray-950/60 border ${rt.installed ? 'border-gray-800 hover:border-emerald-500/40' : 'border-amber-500/30 bg-amber-950/10'} space-y-2 flex flex-col justify-between" data-tool-id="${rt.id}">
         <div class="space-y-1">
           <div class="flex items-center justify-between gap-1">
             <h4 class="font-bold text-xs ${rt.installed ? 'text-gray-100' : 'text-amber-200'} truncate" title="${escapeHtml(rt.name)}">${escapeHtml(rt.name)}</h4>
-            <span class="text-[9px] font-semibold px-2 py-0.5 rounded uppercase shrink-0 ${rt.installed ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/15 text-amber-400 border-amber-500/30'}">
+            <span id="tool-status-${rt.id}" class="text-[9px] font-semibold px-2 py-0.5 rounded uppercase shrink-0 ${rt.installed ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-amber-500/15 text-amber-400 border-amber-500/30'}">
               ${rt.installed ? '✓ Kurulu' : '⚠️ Eksik'}
             </span>
           </div>
@@ -2714,7 +2733,7 @@ async function loadSystemHealth(btnEl) {
             </div>
           ` : `
             <div class="space-y-1.5">
-              <button onclick="installSystemTool('${rt.id}', this)" class="w-full py-1.5 px-3 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white shadow-lg cursor-pointer transition-all active:scale-95 flex items-center justify-center gap-1.5">
+              <button id="tool-btn-${rt.id}" onclick="installSystemTool('${rt.id}', this)" class="w-full py-1.5 px-3 rounded-xl text-xs font-bold bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 text-white shadow-lg cursor-pointer transition-all active:scale-95 flex items-center justify-center gap-1.5">
                 <i data-lucide="zap" class="w-3.5 h-3.5 fill-current"></i> ⚡ Tek Tıkla Kur
               </button>
               <div class="text-[10px] text-amber-300/80 truncate">
@@ -2736,6 +2755,133 @@ async function loadSystemHealth(btnEl) {
       if (window.lucide) lucide.createIcons();
     }
   }
+}
+
+// Bulk install pipeline — installs all missing tools sequentially
+async function bulkInstallMissingTools(btnEl) {
+  const missing = [..._missingSystemTools];
+  if (missing.length === 0) {
+    showToast('✅ Tüm araçlar zaten kurulu!');
+    return;
+  }
+
+  // UI setup
+  const progressPanel = document.getElementById('bulk-install-progress');
+  const progressbar  = document.getElementById('bulk-install-progressbar');
+  const counter      = document.getElementById('bulk-install-counter');
+  const log          = document.getElementById('bulk-install-log');
+  const bulkLabel    = document.getElementById('bulk-install-btn-label');
+
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.classList.remove('animate-pulse');
+  }
+  if (progressPanel) progressPanel.classList.remove('hidden');
+  if (log) log.innerHTML = '';
+
+  const total = missing.length;
+  let done = 0;
+  let succeeded = 0;
+  let failed = 0;
+
+  const setProgress = () => {
+    const pct = Math.round((done / total) * 100);
+    if (progressbar) progressbar.style.width = pct + '%';
+    if (counter) counter.textContent = `${done} / ${total}`;
+  };
+
+  const appendLog = (id, status, msg) => {
+    if (!log) return;
+    const colors = {
+      pending:  'text-gray-500',
+      running:  'text-cyan-300',
+      ok:       'text-emerald-400',
+      error:    'text-red-400',
+      skip:     'text-gray-500',
+    };
+    const icons = { pending: '⏳', running: '🔄', ok: '✅', error: '❌', skip: '⏭️' };
+    const existing = document.getElementById(`bulk-log-${id}`);
+    const html = `<div id="bulk-log-${id}" class="${colors[status] || 'text-gray-400'}">${icons[status] || '•'} ${id} — ${escapeHtml(msg)}</div>`;
+    if (existing) existing.outerHTML = html;
+    else log.insertAdjacentHTML('beforeend', html);
+    log.scrollTop = log.scrollHeight;
+  };
+
+  // Add pending rows
+  missing.forEach(id => appendLog(id, 'pending', 'Bekliyor...'));
+  setProgress();
+  if (bulkLabel) bulkLabel.textContent = `Kuruluyor... 0/${total}`;
+
+  for (const id of missing) {
+    // Update card status badge
+    const badge = document.getElementById(`tool-status-${id}`);
+    const toolBtn = document.getElementById(`tool-btn-${id}`);
+    if (badge) { badge.textContent = '⏳ Kuruluyor'; badge.className = 'text-[9px] font-semibold px-2 py-0.5 rounded uppercase shrink-0 bg-cyan-500/15 text-cyan-300 border-cyan-500/30'; }
+    if (toolBtn) { toolBtn.disabled = true; toolBtn.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Kuruluyor...'; if (window.lucide) lucide.createIcons(); }
+    appendLog(id, 'running', 'Kurulum başlatılıyor...');
+
+    try {
+      const res = await fetch(`${API_BASE}/api/system/install`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Kurulum başlatılamadı');
+
+      // Wait for the background task to likely finish (winget/brew can take 30-120s)
+      appendLog(id, 'running', `Arka planda çalışıyor... (${data.command || id})`);
+      await new Promise(resolve => setTimeout(resolve, 8000));
+
+      // Re-check if tool is now installed
+      const checkRes = await fetch(`${API_BASE}/api/system/health`);
+      const checkData = checkRes.ok ? await checkRes.json() : null;
+      const toolCheck = checkData?.runtimes?.find(r => r.id === id);
+
+      if (toolCheck?.installed) {
+        appendLog(id, 'ok', `Kuruldu — ${toolCheck.version || 'v?'}`);
+        if (badge) { badge.textContent = '✓ Kurulu'; badge.className = 'text-[9px] font-semibold px-2 py-0.5 rounded uppercase shrink-0 bg-emerald-500/15 text-emerald-400 border-emerald-500/30'; }
+        succeeded++;
+        // Remove from _missingSystemTools
+        _missingSystemTools = _missingSystemTools.filter(x => x !== id);
+      } else {
+        appendLog(id, 'error', 'Kurulum sonrası hâlâ tespit edilemiyor — Aktivite Günlüğü\'nü kontrol edin');
+        if (badge) { badge.textContent = '⚠️ Eksik'; badge.className = 'text-[9px] font-semibold px-2 py-0.5 rounded uppercase shrink-0 bg-amber-500/15 text-amber-400 border-amber-500/30'; }
+        if (toolBtn) { toolBtn.disabled = false; toolBtn.innerHTML = '<i data-lucide="zap" class="w-3.5 h-3.5"></i> Tekrar Dene'; if (window.lucide) lucide.createIcons(); }
+        failed++;
+      }
+    } catch (e) {
+      appendLog(id, 'error', e.message);
+      if (badge) { badge.textContent = '❌ Hata'; badge.className = 'text-[9px] font-semibold px-2 py-0.5 rounded uppercase shrink-0 bg-red-500/15 text-red-400 border-red-500/30'; }
+      if (toolBtn) { toolBtn.disabled = false; toolBtn.innerHTML = '<i data-lucide="zap" class="w-3.5 h-3.5"></i> Tekrar Dene'; if (window.lucide) lucide.createIcons(); }
+      failed++;
+    }
+
+    done++;
+    setProgress();
+    if (bulkLabel) bulkLabel.textContent = `Kuruluyor... ${done}/${total}`;
+  }
+
+  // Done
+  const summaryMsg = `✅ Toplu kurulum tamamlandı: ${succeeded} başarılı, ${failed > 0 ? failed + ' başarısız' : '0 hata'}`;
+  showToast(summaryMsg);
+  if (bulkLabel) bulkLabel.textContent = succeeded === total ? '🎉 Tüm Araçlar Kuruldu!' : `⚡ ${_missingSystemTools.length} Eksik Aracı Kur`;
+  if (progressbar) {
+    progressbar.style.width = '100%';
+    progressbar.className = progressbar.className.replace(
+      'from-cyan-500 to-emerald-500',
+      failed === 0 ? 'from-emerald-500 to-green-400' : 'from-amber-500 to-orange-400'
+    );
+  }
+
+  // Re-enable button if still missing tools
+  if (btnEl) {
+    btnEl.disabled = _missingSystemTools.length === 0;
+    if (_missingSystemTools.length > 0) btnEl.classList.add('animate-pulse');
+  }
+
+  // Refresh health after short delay
+  setTimeout(() => loadSystemHealth(), 2000);
 }
 
 // ---------- Session Store (Oturum Koruma / Persistence Across F5) ----------

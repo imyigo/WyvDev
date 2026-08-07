@@ -125,6 +125,37 @@
           <div id="system-health-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             <p class="text-xs text-gray-400 col-span-full text-center py-6">Sistem motorları taranıyor...</p>
           </div>
+
+          <!-- Bulk Install Bar — shown only when missing tools exist -->
+          <div id="bulk-install-bar" class="hidden">
+            <div class="border-t border-gray-800 pt-3 space-y-3">
+              <!-- Progress panel (hidden until bulk install starts) -->
+              <div id="bulk-install-progress" class="hidden bg-gray-950/80 rounded-xl p-3 space-y-2 border border-gray-700">
+                <div class="flex items-center justify-between text-xs">
+                  <span class="font-semibold text-gray-200 flex items-center gap-1.5">
+                    <i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin text-cyan-400"></i>
+                    Toplu Kurulum Devam Ediyor...
+                  </span>
+                  <span id="bulk-install-counter" class="font-mono text-cyan-300">0 / 0</span>
+                </div>
+                <!-- Progress bar -->
+                <div class="w-full bg-gray-800 rounded-full h-1.5 overflow-hidden">
+                  <div id="bulk-install-progressbar" class="h-1.5 bg-gradient-to-r from-cyan-500 to-emerald-500 rounded-full transition-all duration-500" style="width:0%"></div>
+                </div>
+                <!-- Per-tool status list -->
+                <div id="bulk-install-log" class="space-y-1 max-h-36 overflow-y-auto font-mono text-[11px]"></div>
+              </div>
+              <!-- Action row -->
+              <div class="flex items-center gap-3 flex-wrap">
+                <button id="bulk-install-btn" onclick="bulkInstallMissingTools(this)"
+                  class="px-5 py-2.5 rounded-xl text-sm font-bold bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white flex items-center gap-2 cursor-pointer shadow-lg shadow-orange-500/20 transition-all active:scale-95 animate-pulse">
+                  <i data-lucide="download-cloud" class="w-4 h-4"></i>
+                  <span id="bulk-install-btn-label">⚡ Tümünü Tek Tıkla Kur</span>
+                </button>
+                <p class="text-[11px] text-gray-500">Eksik araçlar sırayla arka planda kurulur. Aktivite Günlüğü'nden takip edebilirsiniz.</p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- WyvDev Agentic Loop Engine Panel -->
