@@ -2524,11 +2524,16 @@ type AnalyzeResult struct {
 	InstallSteps    []InstallStep `json:"installSteps"`
 	EnvVarsNeeded   []string      `json:"envVarsNeeded"`
 	PortSuggestion  int           `json:"portSuggestion"`
-	DiskEstimateMB  int           `json:"diskEstimateMB"`
-	HasDockerfile   bool          `json:"hasDockerfile"`
-	HasCompose      bool          `json:"hasCompose"`
-	HasMakefile     bool          `json:"hasMakefile"`
+	DiskEstimateMB     int           `json:"diskEstimateMB"`
+	HasDockerfile      bool          `json:"hasDockerfile"`
+	HasCompose         bool          `json:"hasCompose"`
+	HasMakefile        bool          `json:"hasMakefile"`
+	HasSkill           bool          `json:"hasSkill"`           // SKILL.md exists in this repo
+	SkillEnabled       bool          `json:"skillEnabled"`       // saved in state.json RecommendedRepos
+	SkillInstalledInIde bool         `json:"skillInstalledInIde"` // physically present in an IDE skills dir
+	SkillIdeNames      []string      `json:"skillIdeNames"`      // which IDEs have this skill installed
 }
+
 
 // detectNodePackageManager returns the right package manager for a Node.js project.
 // Priority: pnpm-lock.yaml → yarn.lock → bun.lockb → package-lock.json → npm (default)
@@ -2850,6 +2855,45 @@ func handleRepoAnalyze(w http.ResponseWriter, r *http.Request) {
 		result.InstallPercent = int(float64(result.InstalledDeps) / float64(result.TotalDeps) * 100)
 	} else if len(result.MissingFiles) == 0 && len(steps) == 0 {
 		result.InstallPercent = 100
+	}
+
+	// ── Skill status ──────────────────────────────────────────────
+	// 1. Does this repo contain a SKILL.md?
+	result.HasSkill = findSkillMd(dir) != ""
+
+	if result.HasSkill {
+		// 2. Is it recorded in state.json RecommendedRepos?
+		if s, serr := loadState(); serr == nil {
+			for _, sk := range s.RecommendedRepos {
+				if sk.ID == name || sk.Name == name {
+					result.SkillEnabled = true
+					break
+				}
+			}
+		}
+
+		// 3. Is it physically installed in any IDE's skills directory?
+		skillFolders := findAllSkillFolders(dir)
+		skillNames := make(map[string]bool)
+		for _, sf := range skillFolders {
+			skillNames[filepath.Base(sf)] = true
+		}
+		for _, ide := range detectIdes() {
+			if ide.SkillsDir == "" {
+				continue
+			}
+			for sName := range skillNames {
+				if _, err2 := os.Stat(filepath.Join(ide.SkillsDir, sName)); err2 == nil {
+					result.SkillInstalledInIde = true
+					result.SkillIdeNames = append(result.SkillIdeNames, ide.Name)
+					break
+				}
+			}
+		}
+		// If it's installed in an IDE, also ensure state reflects that
+		if result.SkillInstalledInIde && !result.SkillEnabled {
+			result.SkillEnabled = true
+		}
 	}
 
 	result.InstallSteps = steps
@@ -3520,6 +3564,24 @@ func handleRepoEnableSkill(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErr(w, 424, "Skill kabul eden bir IDE tespit edilmedi (şu an sadece Claude Code CLI destekleniyor).")
 		return
+	}
+
+	// ── Persist to state.json so the UI knows this skill is enabled ──
+	if s, err2 := loadState(); err2 == nil {
+		alreadyInState := false
+		for _, sk := range s.RecommendedRepos {
+			if sk.ID == name || sk.Name == name {
+				alreadyInState = true
+				break
+			}
+		}
+		if !alreadyInState {
+			s.RecommendedRepos = append(s.RecommendedRepos, SkillEntry{
+				ID:   name,
+				Name: name,
+			})
+			_ = saveState(s)
+		}
 	}
 
 	logActivity("skill-enable", fmt.Sprintf("%s -> %d IDE", name, copiedCount))

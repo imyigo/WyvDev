@@ -1047,7 +1047,31 @@ function renderAimAnalysis(a) {
   if (a.hasDockerfile) extraItems.push(`<div class="text-[10px] text-blue-400 flex items-center gap-1">🐳 Dockerfile mevcut</div>`);
   if (a.hasCompose)    extraItems.push(`<div class="text-[10px] text-blue-400 flex items-center gap-1">🐳 Compose mevcut</div>`);
   if (a.hasMakefile)   extraItems.push(`<div class="text-[10px] text-gray-400 flex items-center gap-1">⚙️ Makefile mevcut</div>`);
+
+  // Skill status — shown directly in the modal
+  if (a.hasSkill) {
+    if (a.skillEnabled || a.skillInstalledInIde) {
+      const ideNames = (a.skillIdeNames || []).join(', ');
+      extraItems.push(`
+        <div class="text-[10px] text-emerald-400 flex items-center gap-1">
+          <i data-lucide="check-circle" class="w-3 h-3"></i>
+          Skill Aktif${ideNames ? ` — ${escapeHtml(ideNames)}` : ''}
+        </div>`);
+    } else {
+      extraItems.push(`
+        <div class="text-[10px] flex items-center gap-2">
+          <i data-lucide="zap" class="w-3 h-3 text-amber-400"></i>
+          <span class="text-amber-300">Skill kurulu değil</span>
+          <button id="aim-skill-enable-btn" onclick="enableSkillToIdes('${escapeHtml(_aimCurrentRepo)}', this)"
+            class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer transition-all">
+            Etkinleştir
+          </button>
+        </div>`);
+    }
+  }
+
   extras.innerHTML = extraItems.join('');
+  if (window.lucide) lucide.createIcons();
 
   // ENV
   if (a.envVarsNeeded && a.envVarsNeeded.length > 0) {
@@ -1060,6 +1084,7 @@ function renderAimAnalysis(a) {
   // Steps
   renderAimSteps(a.installSteps || []);
 }
+
 
 function renderAimSteps(steps) {
   const container = document.getElementById('aim-steps');
@@ -2396,7 +2421,6 @@ async function dockerInstallAndRun(name, btnEl) {
 // Copies the skill straight into every IDE that has a skills folder (today:
 // Claude Code CLI) — the real "enable" action, not just adding a catalog entry.
 async function enableSkillToIdes(name, btnEl) {
-  const originalLabel = btnEl ? btnEl.innerHTML : null;
   if (btnEl) {
     btnEl.disabled = true;
     btnEl.innerHTML = '<i data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i> Etkinleştiriliyor...';
@@ -2407,12 +2431,28 @@ async function enableSkillToIdes(name, btnEl) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Etkinleştirilemedi');
     showToast(data.message || `✅ '${name}' skill'i etkinleştirildi.`);
+
+    // ── Immediately reflect the change ──
+    // 1. Update global recommendedRepos so table/grid re-renders correctly
+    if (!activeRecommendedRepos.some(s => s.id === name || s.name === name)) {
+      activeRecommendedRepos.push({ id: name, name: name });
+    }
+    // 2. Refresh the library list (re-renders rows with updated alreadySkill)
+    if (typeof loadLibraryScan === 'function') loadLibraryScan();
+    // 3. If install modal is open for this repo, refresh analyze
+    if (_aimCurrentRepo === name && typeof loadAimAnalysis === 'function') {
+      loadAimAnalysis();
+    }
+    // 4. Swap the button in-place if it's still in the DOM
+    if (btnEl && btnEl.isConnected) {
+      btnEl.outerHTML = `<span class="text-[10px] text-emerald-500 flex items-center gap-1"><i data-lucide="check-circle" class="w-3 h-3"></i> Skill ekli</span>`;
+      if (window.lucide) lucide.createIcons();
+    }
   } catch (e) {
     showToast('⚠️ ' + e.message);
-  } finally {
     if (btnEl) {
       btnEl.disabled = false;
-      btnEl.innerHTML = originalLabel;
+      btnEl.innerHTML = 'Skill\'i Etkinleştir';
       if (window.lucide) lucide.createIcons();
     }
   }
